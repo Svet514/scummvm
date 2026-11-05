@@ -77,7 +77,6 @@ jobs:
               --disable-all-engines \
               --enable-engine=scumm \
               --enable-engine=queen \
-              --disable-opengl \
               --disable-opengl-game \
               --disable-gles2 \
               --disable-3d \
