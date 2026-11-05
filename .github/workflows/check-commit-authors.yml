@@ -53,7 +53,6 @@ jobs:
               --disable-updates \
               --disable-tts \
               --disable-bink \
-              --disable-opengl \
               --enable-release
             
             # 5. Build, strip, and export
