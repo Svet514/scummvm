@@ -13,15 +13,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile ScummVM Inside Debian Buster Container (Cortex-A9 Optimized)
+- name: Compile ScummVM Inside Debian Buster Container (Cortex-A9 Optimized)
         run: |
           docker run --rm -v "$PWD:/work" -w /work debian:buster bash -c '
             set -e
             set -o pipefail
             
-            # 1. Add ARM architecture, install toolchain and dependencies
+            # 1. Add ARM architecture, point to Debian Archive, and install dependencies
             dpkg --add-architecture armel
-            apt-get update
+            echo "deb http://archive.debian.org/debian buster main" > /etc/apt/sources.list
+            apt-get update -o Acquire::Check-Valid-Until=false
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libsdl1.2-dev:armel
             
             # 2. Download and extract target release
