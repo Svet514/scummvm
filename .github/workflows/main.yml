@@ -24,22 +24,27 @@ jobs:
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config
             
             # 2. Bypass APT multi-arch dependency hell by manually extracting the ARM SDL libraries.
-            # This guarantees we compile against the headers, but dynamically link to the Leapster custom SDL at runtime.
             mkdir -p /tmp/sdl
             wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2-dev_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-dev.deb
             wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2debian_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-lib.deb
             dpkg -x /tmp/sdl-dev.deb /tmp/sdl
             dpkg -x /tmp/sdl-lib.deb /tmp/sdl
             
-            # Move the SDL headers and libs directly into the cross-compiler default search paths
             mkdir -p /usr/arm-linux-gnueabi/include /usr/arm-linux-gnueabi/lib
-            cp -r /tmp/sdl/usr/include/* /usr/arm-linux-gnueabi/include/
-            cp -r /tmp/sdl/usr/lib/arm-linux-gnueabi/* /usr/arm-linux-gnueabi/lib/
+            cp -R /tmp/sdl/usr/include/* /usr/arm-linux-gnueabi/include/
+            cp -R /tmp/sdl/usr/lib/arm-linux-gnueabi/* /usr/arm-linux-gnueabi/lib/
+            
+            # Recreate the symlink manually to ensure it points correctly within the cross-compiler directory
+            cd /usr/arm-linux-gnueabi/lib
+            ln -sf libSDL-1.2.so.0.11.4 libSDL.so
+            ln -sf libSDL-1.2.so.0.11.4 libSDL-1.2.so.0
+            cd /work
             
             # Create an sdl-config wrapper so ScummVM configure script finds the library
+            # CRITICAL FIX: We embed -Wl,--allow-shlib-undefined directly into the output to force the linker to ignore missing X11/ALSA dependencies.
             echo "#!/bin/sh" > /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--cflags\" ]; then echo \"-I/usr/arm-linux-gnueabi/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT\"; fi" >> /usr/bin/sdl-config
-            echo "if [ \"\$1\" = \"--libs\" ]; then echo \"/usr/arm-linux-gnueabi/lib/libSDL.so -lpthread -lm -ldl\"; fi" >> /usr/bin/sdl-config
+            echo "if [ \"\$1\" = \"--libs\" ]; then echo \"-L/usr/arm-linux-gnueabi/lib -lSDL -lpthread -Wl,--allow-shlib-undefined\"; fi" >> /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--version\" ]; then echo \"1.2.15\"; fi" >> /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--prefix\" ]; then echo \"/usr/arm-linux-gnueabi\"; fi" >> /usr/bin/sdl-config
             chmod +x /usr/bin/sdl-config
@@ -60,7 +65,7 @@ jobs:
             
             export CFLAGS="$OPT_FLAGS -DHAVE_NEON=0"
             export CXXFLAGS="$OPT_FLAGS -DHAVE_NEON=0 -static-libstdc++ -static-libgcc"
-            export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc"
+            export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -Wl,--allow-shlib-undefined"
             
             # 5. Configure for minimal Scumm engine footprint
             ./configure \
