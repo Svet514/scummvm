@@ -13,20 +13,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile ScummVM Inside Ubuntu 18.04 Container (Cortex-A9 Optimized)
+      - name: Compile ScummVM Inside Debian Buster Container (Cortex-A9 Optimized)
         run: |
-          docker run --rm -v "$PWD:/work" -w /work ubuntu:18.04 bash -c '
+          docker run --rm -v "$PWD:/work" -w /work debian:buster bash -c '
             set -e
             set -o pipefail
             
-            # 1. Install toolchain and dependencies
+            # 1. Add ARM architecture, install toolchain and dependencies
+            dpkg --add-architecture armel
             apt-get update
-            apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar
-            # Add the ARM architecture and install dependencies
-          dpkg --add-architecture armel
-          apt-get update
-          apt-get install -y pkg-config libsdl1.2-dev:armel
-
+            apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libsdl1.2-dev:armel
             
             # 2. Download and extract target release
             wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
@@ -45,10 +41,11 @@ jobs:
             export CXXFLAGS="$OPT_FLAGS -DHAVE_NEON=0 -static-libstdc++ -static-libgcc"
             export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc"
             
-            # 4. Configure for minimal Scumm engine footprint
+            # 4. Configure for minimal Scumm engine footprint (with OpenGL disabled)
             ./configure \
               --host=arm-linux-gnueabi \
               --backend=sdl \
+              --disable-opengl \
               --disable-all-engines \
               --enable-engine=scumm \
               --disable-debug \
