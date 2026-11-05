@@ -22,7 +22,7 @@ jobs:
             # 1. Install toolchain and basic dependencies (adding native X11 headers to satisfy SDL_syswm.h)
             apt-get update
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libx11-dev libxext-dev
-            
+
             # 2. Bypass APT multi-arch dependency hell by manually extracting the ARM SDL libraries.
             mkdir -p /tmp/sdl
             wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2-dev_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-dev.deb
@@ -71,6 +71,11 @@ jobs:
             export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -Wl,--allow-shlib-undefined"
             
             # 5. Configure for minimal Scumm engine footprint
+            apt-get update && apt-get install -y wget tar
+            wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
+            tar -xzf scummvm.tar.gz
+            cd scummvm-2026.4.0
+            ./configure --help | grep -i opengl
             ./configure \
               --host=arm-linux-gnueabi \
               --backend=sdl \
