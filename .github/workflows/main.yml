@@ -3,7 +3,7 @@ name: Build ScummVM Leapster
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch: # This allows you to manually trigger the build from the Actions tab
+  workflow_dispatch:
 
 jobs:
   build:
@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-- name: Compile ScummVM Inside Debian Buster Container (Cortex-A9 Optimized)
+      - name: Compile ScummVM Inside Debian Buster Container (Cortex-A9 Optimized)
         run: |
           docker run --rm -v "$PWD:/work" -w /work debian:buster bash -c '
             set -e
