@@ -19,9 +19,9 @@ jobs:
             set -e
             set -o pipefail
             
-            # 1. Install toolchain and basic dependencies
+            # 1. Install toolchain and basic dependencies (adding native X11 headers to satisfy SDL_syswm.h)
             apt-get update
-            apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config
+            apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libx11-dev libxext-dev
             
             # 2. Bypass APT multi-arch dependency hell by manually extracting the ARM SDL libraries.
             mkdir -p /tmp/sdl
@@ -34,6 +34,9 @@ jobs:
             cp -R /tmp/sdl/usr/include/* /usr/arm-linux-gnueabi/include/
             cp -R /tmp/sdl/usr/lib/arm-linux-gnueabi/* /usr/arm-linux-gnueabi/lib/
             
+            # Provide the standard X11 headers to the ARM cross-compiler to pass the syntax check
+            cp -R /usr/include/X11 /usr/arm-linux-gnueabi/include/
+            
             # Recreate the symlink manually to ensure it points correctly within the cross-compiler directory
             cd /usr/arm-linux-gnueabi/lib
             ln -sf libSDL-1.2.so.0.11.4 libSDL.so
@@ -41,7 +44,7 @@ jobs:
             cd /work
             
             # Create an sdl-config wrapper so ScummVM configure script finds the library
-            # CRITICAL FIX: We embed -Wl,--allow-shlib-undefined directly into the output to force the linker to ignore missing X11/ALSA dependencies.
+            # Embed -Wl,--allow-shlib-undefined directly into the output to force the linker to ignore missing X11/ALSA dependencies.
             echo "#!/bin/sh" > /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--cflags\" ]; then echo \"-I/usr/arm-linux-gnueabi/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT\"; fi" >> /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--libs\" ]; then echo \"-L/usr/arm-linux-gnueabi/lib -lSDL -lpthread -Wl,--allow-shlib-undefined\"; fi" >> /usr/bin/sdl-config
