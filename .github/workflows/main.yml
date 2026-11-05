@@ -19,10 +19,15 @@ jobs:
             set -e
             set -o pipefail
             
-            # 1. Add ARM architecture, point to Debian Archive, and install dependencies
+            # 1. Add ARM architecture and point to ALL Debian Archive repos to resolve multi-arch mismatches
             dpkg --add-architecture armel
             echo "deb http://archive.debian.org/debian buster main" > /etc/apt/sources.list
+            echo "deb http://archive.debian.org/debian buster-updates main" >> /etc/apt/sources.list
+            echo "deb http://archive.debian.org/debian-security buster/updates main" >> /etc/apt/sources.list
+            
             apt-get update -o Acquire::Check-Valid-Until=false
+            
+            # Install toolchain and dependencies
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libsdl1.2-dev:armel
             
             # 2. Download and extract target release
