@@ -71,20 +71,15 @@ jobs:
             export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -Wl,--allow-shlib-undefined"
             
             # 5. Configure for minimal Scumm engine footprint
-            apt-get update && apt-get install -y wget tar
-            wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
-            tar -xzf scummvm.tar.gz
-            cd scummvm-2026.4.0
-            ./configure --help | grep -i opengl
             ./configure \
               --host=arm-linux-gnueabi \
               --backend=sdl \
+              --opengl-mode=none \
+              --disable-opengl-game-classic \
+              --disable-opengl-game-shaders \
               --disable-all-engines \
               --enable-engine=scumm \
               --enable-engine=queen \
-              --disable-opengl-game \
-              --disable-gles2 \
-              --disable-3d \
               --disable-debug \
               --disable-cloud \
               --disable-libcurl \
