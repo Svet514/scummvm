@@ -22,6 +22,11 @@ jobs:
             # 1. Install toolchain and dependencies
             apt-get update
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar
+            # Add the ARM architecture and install dependencies
+          dpkg --add-architecture armel
+          apt-get update
+          apt-get install -y pkg-config libsdl1.2-dev:armel
+
             
             # 2. Download and extract target release
             wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
