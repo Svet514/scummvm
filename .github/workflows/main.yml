@@ -76,6 +76,11 @@ jobs:
               --backend=sdl \
               --disable-all-engines \
               --enable-engine=scumm \
+              --enable-engine=queen \
+              --disable-opengl \
+              --disable-opengl-game \
+              --disable-gles2 \
+              --disable-3d \
               --disable-debug \
               --disable-cloud \
               --disable-libcurl \
