@@ -61,11 +61,10 @@ jobs:
             export CXXFLAGS="$OPT_FLAGS -DHAVE_NEON=0 -static-libstdc++ -static-libgcc"
             export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc"
             
-            # 5. Configure for minimal Scumm engine footprint (with OpenGL disabled)
+            # 5. Configure for minimal Scumm engine footprint
             ./configure \
               --host=arm-linux-gnueabi \
               --backend=sdl \
-              --disable-opengl \
               --disable-all-engines \
               --enable-engine=scumm \
               --disable-debug \
