@@ -165,6 +165,7 @@ jobs:
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
             export AR="arm-linux-gnueabi-ar"
+            export ARFLAGS="rcs"
             export AS="arm-linux-gnueabi-as"
             export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
