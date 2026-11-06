@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core (Leapster Cortex-A9 Optimized)
+name: Build ScummVM Libretro Core (Leapster Cortex-A9 32-bit Color)
 
 on:
   push:
@@ -39,7 +39,7 @@ jobs:
             git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
             cd scummvm-2026.4.0
 
-            # 3. Configure strictly for SCUMM engine, disable curl/cloud/opengl/alsa, and inject Cortex-A9 flags
+            # 3. Configure strictly for SCUMM engine, keep 32-bit color (HIGH_DEF=1), and undefine curl/cloud/alsa/opengl
             python3 - << "PYEOF"
           import os
           import re
@@ -51,30 +51,28 @@ jobs:
               with open(p, "w") as f:
                   f.write(lite_content)
 
-          # 3B. Disable non-SCUMM engines in engines/engines.mk
-          eng_mk = "engines/engines.mk"
-          if os.path.exists(eng_mk):
-              with open(eng_mk, "r") as f:
-                  emk = f.read()
-              emk = re.sub(
-                  r"^(\s*ENABLE_([A-Z0-9_]+)\s*=\s*STATIC_PLUGIN)",
-                  lambda m: m.group(0) if m.group(2) in ("SCUMM", "SCUMM_7_8", "HE") else "# " + m.group(0),
-                  emk,
-                  flags=re.M
-              )
-              with open(eng_mk, "w") as f:
-                  f.write(emk)
-              print("Restricted engines/engines.mk to SCUMM only!")
+          # 3B. Stub out networking/cloud module.mk files so curl/socket.cpp & url.cpp can never be added
+          for mod_mk in [
+              "backends/networking/basic/module.mk",
+              "backends/networking/curl/module.mk",
+              "backends/networking/http/module.mk",
+              "backends/networking/sdl_net/module.mk",
+              "backends/cloud/module.mk"
+          ]:
+              if os.path.exists(mod_mk):
+                  with open(mod_mk, "w") as f:
+                      f.write("# Disabled for Leapster offline build\n")
+                  print(f"Stubbed {mod_mk}!")
 
-          # 3C. Force all unnecessary external libraries & curl/cloud/opengl off in Makefile, Makefile.common, and dependencies.mk
+          # 3C. Disable unwanted features in backends/platform/libretro/{Makefile,Makefile.common,dependencies.mk}
           disable_vars = [
               "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
               "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH",
               "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC",
               "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD",
-              "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_BINK", "USE_TTS",
+              "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_BINK", "USE_TTS",
               "USE_DISCORD", "USE_RETROACHIEVEMENTS", "OPENGL_SUPPORT", "USE_OPENGL",
-              "HAVE_OPENGL", "HIGH_DEF"
+              "HAVE_OPENGL"
           ]
 
           for mk_rel in [
@@ -92,7 +90,35 @@ jobs:
                       f.write(txt)
                   print(f"Sanitized {mk_rel}!")
 
-          # 3D. Also ensure scripts/configure_engines.sh never enables curl, cloud, basic_net, or alsa
+          # 3D. Append undefine directives to Makefile.common right after config.mk is included
+          #     Because ScummVM module.mk files use `ifdef USE_FOO` (which is true even if USE_FOO=0!),
+          #     we must `undefine` them so `ifdef USE_FOO` evaluates to FALSE.
+          mk_common = "backends/platform/libretro/Makefile.common"
+          with open(mk_common, "r") as f:
+              mc = f.read()
+
+          undef_block = "\n# Force undefine for ScummVM module.mk ifdef checks\n"
+          for v in disable_vars:
+              undef_block += f"override undefine {v}\n"
+
+          # Insert undef_block before the first `include $(SCUMMVM_PATH)/` module inclusion
+          assert "SCUMMVM_PATH" in mc, "SCUMMVM_PATH not found in Makefile.common"
+          mc = re.sub(
+              r"(include\s+\$\(SCUMMVM_PATH\)/engines/engines\.mk)",
+              undef_block + r"\n\1",
+              mc,
+              count=1
+          )
+          # Also remove any networking/cloud module directories if listed in MODULES
+          mc = mc.replace("backends/networking/basic", "")
+          mc = mc.replace("backends/networking/curl", "")
+          mc = mc.replace("backends/networking/http", "")
+          mc = mc.replace("backends/cloud", "")
+          with open(mk_common, "w") as f:
+              f.write(mc)
+          print("Injected `override undefine` block into backends/platform/libretro/Makefile.common!")
+
+          # 3E. Patch scripts/configure_engines.sh to disable curl/cloud/basic-net/alsa
           cfg_sh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(cfg_sh):
               with open(cfg_sh, "r") as f:
@@ -105,7 +131,7 @@ jobs:
                   f.write(sh_txt)
               print("Patched scripts/configure_engines.sh!")
 
-          # 3E. Inject Cortex-A9 optimization flags and static C++ runtime into backends/platform/libretro/Makefile
+          # 3F. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
@@ -114,16 +140,8 @@ jobs:
 
           inject_block = f"""
           TARGET_64BIT := 0
-          NO_HIGH_DEF := 1
-          HIGH_DEF := 0
+          HIGH_DEF := 1
           OPENGL_SUPPORT := 0
-          USE_OPENGL := 0
-          HAVE_OPENGL := 0
-          USE_CURL := 0
-          USE_LIBCURL := 0
-          USE_CLOUD := 0
-          USE_BASIC_NET := 0
-          USE_ALSA := 0
           HAVE_NEON := 0
           CFLAGS += {opt_flags}
           CXXFLAGS += {opt_flags}
@@ -134,7 +152,7 @@ jobs:
           mk = mk.replace("include Makefile.common", inject_block + "\ninclude Makefile.common")
           with open(mk_file, "w") as f:
               f.write(mk)
-          print("Injected Cortex-A9 flags into backends/platform/libretro/Makefile!")
+          print("Injected Cortex-A9 flags + 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile!")
           PYEOF
 
             # 4. Export cross-compiler tools
@@ -148,45 +166,19 @@ jobs:
             cd backends/platform/libretro
 
             # 5. Build scummvm_libretro.so and auxiliary datafiles (scummvm.zip + scummvm_libretro.info)
+            #    IMPORTANT: Do NOT pass USE_*=0 on the make CLI so `override undefine` in Makefile.common works cleanly!
             make \
               platform=unix \
               ARCH=arm \
               TARGET_64BIT=0 \
-              NO_HIGH_DEF=1 \
-              HIGH_DEF=0 \
+              HIGH_DEF=1 \
               CC="$CC" \
               CXX="$CXX" \
               AR="$AR" \
               LD="$LD" \
               LITE=1 \
-              LITE_BUILD=1 \
               NO_WIP=1 \
               OPENGL_SUPPORT=0 \
-              USE_OPENGL=0 \
-              HAVE_OPENGL=0 \
-              USE_CURL=0 \
-              USE_LIBCURL=0 \
-              USE_CLOUD=0 \
-              USE_BASIC_NET=0 \
-              USE_SDL_NET=0 \
-              USE_ALSA=0 \
-              USE_SEQ_MIDI=0 \
-              USE_SNDIO=0 \
-              USE_TIMIDITY=0 \
-              USE_MT32EMU=0 \
-              USE_FLUIDSYNTH=0 \
-              USE_FLAC=0 \
-              USE_VORBIS=0 \
-              USE_TREMOR=0 \
-              USE_MAD=0 \
-              USE_FAAD=0 \
-              USE_MPEG2=0 \
-              USE_THEORADEC=0 \
-              USE_FREETYPE2=0 \
-              USE_FRIBIDI=0 \
-              USE_PNG=1 \
-              USE_ZLIB=1 \
-              USE_JPEG=1 \
               HAVE_NEON=0 \
               -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
 
