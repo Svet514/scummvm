@@ -10,48 +10,24 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Compile ScummVM Libretro Core Inside Ubuntu 18.04 Container
+      - name: Clone & Patch ScummVM v2026.4.0 (SCUMM Only + 32-bit Color + No ImGui/Curl)
         run: |
-          docker run --rm -v "$PWD:/work" -w /work ubuntu:18.04 bash -c '
-            set -e
-            set -o pipefail
+          rm -rf scummvm-2026.4.0
+          git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
+          cd scummvm-2026.4.0
 
-            # 1. Install ARMv7 softfp cross-compiler, git, and build tools
-            apt-get update
-            apt-get install -y \
-              git \
-              ca-certificates \
-              pkg-config \
-              gcc-arm-linux-gnueabi \
-              g++-arm-linux-gnueabi \
-              binutils-arm-linux-gnueabi \
-              make \
-              wget \
-              tar \
-              zip \
-              unzip \
-              sed \
-              gawk \
-              python3
-
-            # 2. Clone official ScummVM v2026.4.0 with .git metadata intact for Libretro submodule scripts
-            rm -rf scummvm-2026.4.0
-            git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
-            cd scummvm-2026.4.0
-
-            # 3. Configure strictly for SCUMM engine, keep 32-bit color (HIGH_DEF=1), and disable imgui/curl/cloud/alsa/opengl
-            python3 - << "PYEOF"
+          python3 - << 'EOF'
           import os
           import re
 
-          # 3A. Write ONLY scumm (+ v7/v8 and HE sub-engines) to lite_engines.list and engines.lite
+          # 1. Write ONLY scumm (+ v7/v8 and HE sub-engines) to lite_engines.list and engines.lite
           lite_content = "scumm\nscumm_7_8\nhe\n"
           for list_name in ["lite_engines.list", "engines.lite"]:
               p = os.path.join("backends/platform/libretro", list_name)
               with open(p, "w") as f:
                   f.write(lite_content)
 
-          # 3B. Stub out imgui, networking, and cloud module.mk files so they are never compiled
+          # 2. Stub out imgui, networking, and cloud module.mk files so they are never compiled
           for mod_mk in [
               "backends/imgui/module.mk",
               "backends/networking/basic/module.mk",
@@ -65,7 +41,7 @@ jobs:
                       f.write("# Disabled for Leapster build\n")
                   print(f"Stubbed {mod_mk}!")
 
-          # 3C. Remove imgui component from root configure script so configure_engines.sh never enables USE_IMGUI
+          # 3. Remove imgui from root configure script so configure_engines.sh never enables USE_IMGUI
           if os.path.exists("configure"):
               with open("configure", "r", errors="ignore") as f:
                   cfg = f.read()
@@ -74,7 +50,7 @@ jobs:
                   f.write(cfg)
               print("Removed imgui component from root configure!")
 
-          # 3D. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
+          # 4. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
           disable_vars = [
               "USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
               "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH",
@@ -100,7 +76,7 @@ jobs:
                       f.write(txt)
                   print(f"Sanitized {mk_rel}!")
 
-          # 3E. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all .mk files and Makefiles
+          # 5. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all .mk files and Makefiles
           var_pattern = "|".join(disable_vars)
           ifdef_re = re.compile(rf"^(\s*)ifdef\s+({var_pattern})\s*$", flags=re.M)
           ifndef_re = re.compile(rf"^(\s*)ifndef\s+({var_pattern})\s*$", flags=re.M)
@@ -120,7 +96,7 @@ jobs:
                           patched_mk_count += 1
           print(f"Converted ifdef -> ifeq ($(VAR), 1) in {patched_mk_count} makefiles!")
 
-          # 3F. Patch scripts/configure_engines.sh to strip USE_IMGUI / USE_LIBCURL / USE_CLOUD / USE_FREETYPE2
+          # 6. Patch scripts/configure_engines.sh to disable curl/cloud/basic-net/alsa
           cfg_sh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(cfg_sh):
               with open(cfg_sh, "r") as f:
@@ -129,18 +105,16 @@ jobs:
               sh_txt = sh_txt.replace("--enable-cloud", "--disable-cloud")
               sh_txt = sh_txt.replace("--enable-basic-net", "--disable-basic-net")
               sh_txt = sh_txt.replace("--enable-alsa", "--disable-alsa")
-              # Also strip any auto-added USE_IMGUI from generated config.mk.engines
-              sh_txt += "\nsed -i '/USE_IMGUI/d; /USE_LIBCURL/d; /USE_CLOUD/d; /USE_FREETYPE2/d' config.mk.engines 2>/dev/null || true\n"
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
               print("Patched scripts/configure_engines.sh!")
 
-          # 3G. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
+          # 7. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
 
-          opt_flags = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -fPIC"
+          opt_flags = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -fPIC"
 
           inject_block = f"""
           TARGET_64BIT := 0
@@ -166,9 +140,28 @@ jobs:
           with open(mk_file, "w") as f:
               f.write(mk)
           print("Injected Cortex-A9 flags + 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile!")
-          PYEOF
+          EOF
 
-            # 4. Export cross-compiler tools
+      - name: Compile Inside Ubuntu 18.04 Container (Cortex-A9 32-bit Color)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work/scummvm-2026.4.0/backends/platform/libretro ubuntu:18.04 bash -c '
+            set -e
+            set -o pipefail
+
+            apt-get update
+            apt-get install -y \
+              git \
+              ca-certificates \
+              pkg-config \
+              gcc-arm-linux-gnueabi \
+              g++-arm-linux-gnueabi \
+              binutils-arm-linux-gnueabi \
+              make \
+              zip \
+              unzip \
+              sed \
+              gawk
+
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
             export AR="arm-linux-gnueabi-ar"
@@ -176,9 +169,6 @@ jobs:
             export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
 
-            cd backends/platform/libretro
-
-            # 5. Build scummvm_libretro.so and auxiliary datafiles (scummvm.zip + scummvm_libretro.info)
             make \
               platform=unix \
               ARCH=arm \
