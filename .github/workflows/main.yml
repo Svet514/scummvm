@@ -121,15 +121,16 @@ jobs:
                           print(f"Forced RETRO_DEVICE_POINTER in {fpath}!")
 
           # 8. Patch backends/platform/libretro/src/libretro-core.cpp:
+          #    - Insert leapster_core_hook AFTER all #includes (right before retro_set_input_state / retro_run)
           #    - Direct LeapsterGS /dev/input/event* touchscreen + /etc/pointercal reader
           #    - 2-frame tap state machine (Frame 1 moves cursor to X,Y; Frame 2 clicks; pen-up keeps last X,Y)
-          #    - Built-in 60.0 Hz (16667 us) monotonic frame limiter in retro_run() so global retroarch.cfg
-          #      can keep video_vsync="false" for PS1 without ScummVM running at 200%-300% speed!
+          #    - Built-in 60.0 Hz (16667 us) monotonic frame limiter in retro_run()
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
 
-          leapster_core_hook = """#include <fcntl.h>
+          leapster_core_hook = """
+          #include <fcntl.h>
           #include <unistd.h>
           #include <stdio.h>
           #include <string.h>
@@ -307,7 +308,12 @@ jobs:
           static uint64_t g_leapster_last_frame_us = 0;
           """
 
-          ctxt = leapster_core_hook + "\n" + ctxt
+          m_in = re.search(r"void\s+retro_set_input_state\s*\(\s*retro_input_state_t\s+\w+\s*\)\s*\{", ctxt)
+          m_run = re.search(r"void\s+retro_run\s*\(\s*(?:void)?\s*\)\s*\{", ctxt)
+          assert m_in and m_run, "Could not locate retro_set_input_state or retro_run in libretro-core.cpp"
+
+          insert_pos = min(m_in.start(), m_run.start())
+          ctxt = ctxt[:insert_pos] + leapster_core_hook + "\n" + ctxt[insert_pos:]
 
           # Hook retro_set_input_state(retro_input_state_t ...)
           ctxt, n_sub_in = re.subn(
