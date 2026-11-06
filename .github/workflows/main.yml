@@ -189,13 +189,12 @@ jobs:
                       assert end_idx != -1, "Could not find closing brace of delayMillis"
                       orig_delay_body = txt[brace_idx:end_idx]
                       m_chk = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", orig_delay_body)
-                      chk_call = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread()"
+                      chk_call = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
 
                       new_delay_fn = (
                           f"void OSystem_libretro::delayMillis(uint {param_name}) {{\n"
                           f"\tuint32 start_time = getMillis();\n"
                           f"\tuint32 elapsed_time = 0;\n"
-                          f"\t_threadSwitchCaller = THREAD_SWITCH_DELAY;\n"
                           f"\tif ({param_name} == 0) {{\n"
                           f"\t\t{chk_call};\n"
                           f"\t\treturn;\n"
