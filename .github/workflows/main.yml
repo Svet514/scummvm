@@ -164,8 +164,8 @@ jobs:
 
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
-            export AR="arm-linux-gnueabi-ar"
-            export ARFLAGS="rcs"
+            export AR="arm-linux-gnueabi-ar cru"
+            export RANLIB="arm-linux-gnueabi-ranlib"
             export AS="arm-linux-gnueabi-as"
             export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
@@ -178,6 +178,7 @@ jobs:
               CC="$CC" \
               CXX="$CXX" \
               AR="$AR" \
+              RANLIB="$RANLIB" \
               LD="$LD" \
               LITE=1 \
               NO_WIP=1 \
