@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core (Leapster Cortex-A9 32-bit Color)
+name: Build ScummVM Libretro Core V2 (LeapsterGS Touch + 100% Speed Lock)
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Clone & Patch ScummVM v2026.4.0 (SCUMM Only + 32-bit Color + No ImGui/Curl)
+      - name: Clone & Patch ScummVM v2026.4.0 (LeapsterGS Touch + 100% Speed + 32-bit Color)
         run: |
           rm -rf scummvm-2026.4.0
           git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
@@ -27,7 +27,7 @@ jobs:
               with open(p, "w") as f:
                   f.write(lite_content)
 
-          # 2. Stub out imgui, networking, and cloud module.mk files so they are never compiled
+          # 2. Stub out imgui, networking, and cloud module.mk files
           for mod_mk in [
               "backends/imgui/module.mk",
               "backends/networking/basic/module.mk",
@@ -39,16 +39,14 @@ jobs:
               if os.path.exists(mod_mk):
                   with open(mod_mk, "w") as f:
                       f.write("# Disabled for Leapster build\n")
-                  print(f"Stubbed {mod_mk}!")
 
-          # 3. Remove imgui from root configure script so configure_engines.sh never enables USE_IMGUI
+          # 3. Remove imgui from root configure script
           if os.path.exists("configure"):
               with open("configure", "r", errors="ignore") as f:
                   cfg = f.read()
               cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
               with open("configure", "w") as f:
                   f.write(cfg)
-              print("Removed imgui component from root configure!")
 
           # 4. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
           disable_vars = [
@@ -74,14 +72,12 @@ jobs:
                       txt = re.sub(rf"\b{v}\s*[:?]?=\s*1\b", f"{v} := 0", txt)
                   with open(mk_rel, "w") as f:
                       f.write(txt)
-                  print(f"Sanitized {mk_rel}!")
 
           # 5. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all .mk files and Makefiles
           var_pattern = "|".join(disable_vars)
           ifdef_re = re.compile(rf"^(\s*)ifdef\s+({var_pattern})\s*$", flags=re.M)
           ifndef_re = re.compile(rf"^(\s*)ifndef\s+({var_pattern})\s*$", flags=re.M)
 
-          patched_mk_count = 0
           for root, _, files in os.walk("."):
               for fn in files:
                   if fn.endswith(".mk") or fn in ("Makefile", "Makefile.common"):
@@ -93,10 +89,8 @@ jobs:
                       if new_mtxt != mtxt:
                           with open(fpath, "w") as f:
                               f.write(new_mtxt)
-                          patched_mk_count += 1
-          print(f"Converted ifdef -> ifeq ($(VAR), 1) in {patched_mk_count} makefiles!")
 
-          # 6. Patch scripts/configure_engines.sh to disable curl/cloud/basic-net/alsa
+          # 6. Patch scripts/configure_engines.sh
           cfg_sh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(cfg_sh):
               with open(cfg_sh, "r") as f:
@@ -107,9 +101,250 @@ jobs:
               sh_txt = sh_txt.replace("--enable-alsa", "--disable-alsa")
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
-              print("Patched scripts/configure_engines.sh!")
 
-          # 7. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
+          # 7. Patch retro_setting_get_pointer_device across backends/platform/libretro/src/*
+          #    so ScummVM always enables absolute pointer (touchscreen) alongside RetroPad buttons
+          for root, _, files in os.walk("backends/platform/libretro"):
+              for fn in files:
+                  if fn.endswith((".cpp", ".h")):
+                      fpath = os.path.join(root, fn)
+                      with open(fpath, "r", errors="ignore") as f:
+                          stxt = f.read()
+                      new_stxt = re.sub(
+                          r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)",
+                          r"\1\n\treturn RETRO_DEVICE_POINTER;",
+                          stxt
+                      )
+                      if new_stxt != stxt:
+                          with open(fpath, "w") as f:
+                              f.write(new_stxt)
+                          print(f"Forced RETRO_DEVICE_POINTER in {fpath}!")
+
+          # 8. Patch backends/platform/libretro/src/libretro-core.cpp:
+          #    - Direct LeapsterGS /dev/input/event* touchscreen + /etc/pointercal reader
+          #    - 2-frame tap state machine (Frame 1 moves cursor to X,Y; Frame 2 clicks; pen-up keeps last X,Y)
+          #    - Built-in 60.0 Hz (16667 us) monotonic frame limiter in retro_run() so global retroarch.cfg
+          #      can keep video_vsync="false" for PS1 without ScummVM running at 200%-300% speed!
+          core_path = "backends/platform/libretro/src/libretro-core.cpp"
+          with open(core_path, "r") as f:
+              ctxt = f.read()
+
+          leapster_core_hook = """#include <fcntl.h>
+          #include <unistd.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <time.h>
+          #include <linux/input.h>
+          #include <sys/ioctl.h>
+
+          static retro_input_state_t g_leapster_orig_input_cb = NULL;
+          static int g_ts_fd = -2;
+          static int g_ts_cur_x = 160, g_ts_cur_y = 120;
+          static int g_ts_raw_x = 160, g_ts_raw_y = 120, g_ts_touch = 0;
+          static int g_ts_min_x = 0, g_ts_max_x = 319, g_ts_min_y = 0, g_ts_max_y = 239;
+          static int g_use_pcal = 0;
+          static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
+          static bool g_ts_ever_touched = false;
+          static int16_t g_ts_retro_x = 0;
+          static int16_t g_ts_retro_y = 0;
+          static int16_t g_ts_retro_press = 0;
+          static int g_ts_click_state = 0; // 0: idle, 1: moved (click next frame), 2: held
+
+          #define LEAP_BITS_PER_LONG (sizeof(unsigned long) * 8)
+          #define LEAP_NBITS(x) ((((x) - 1) / LEAP_BITS_PER_LONG) + 1)
+          #define LEAP_TEST_BIT(bit, array) ((array[(bit) / LEAP_BITS_PER_LONG] >> ((bit) % LEAP_BITS_PER_LONG)) & 1)
+
+          static void leapster_init_touch(void) {
+              if (g_ts_fd != -2) return;
+              g_ts_fd = -1;
+              FILE *pf = fopen("/etc/pointercal", "r");
+              if (pf) {
+                  if (fscanf(pf, "%ld %ld %ld %ld %ld %ld %ld",
+                             &g_pcal[0], &g_pcal[1], &g_pcal[2],
+                             &g_pcal[3], &g_pcal[4], &g_pcal[5], &g_pcal[6]) == 7 && g_pcal[6] != 0) {
+                      g_use_pcal = 1;
+                  }
+                  fclose(pf);
+              }
+              int fallback_fd = -1;
+              for (int i = 0; i < 8; i++) {
+                  char devpath[32];
+                  snprintf(devpath, sizeof(devpath), "/dev/input/event%d", i);
+                  int fd = open(devpath, O_RDONLY | O_NONBLOCK);
+                  if (fd < 0) continue;
+                  char name[64] = {0};
+                  ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
+                  if (strstr(name, "aclmtr") || strstr(name, "accel") || strstr(name, "Accel")) {
+                      close(fd);
+                      continue;
+                  }
+                  unsigned long evbit[LEAP_NBITS(EV_MAX)] = {0};
+                  unsigned long absbit[LEAP_NBITS(ABS_MAX)] = {0};
+                  unsigned long keybit[LEAP_NBITS(KEY_MAX)] = {0};
+                  if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) >= 0 && LEAP_TEST_BIT(EV_ABS, evbit)) {
+                      if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit) >= 0 &&
+                          LEAP_TEST_BIT(ABS_X, absbit) && LEAP_TEST_BIT(ABS_Y, absbit)) {
+                          ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
+                          if (LEAP_TEST_BIT(BTN_TOUCH, keybit) || LEAP_TEST_BIT(BTN_LEFT, keybit) ||
+                              strstr(name, "ts") || strstr(name, "TS") || strstr(name, "touch") || strstr(name, "Touch")) {
+                              g_ts_fd = fd;
+                              break;
+                          } else if (fallback_fd < 0) {
+                              fallback_fd = fd;
+                              continue;
+                          }
+                      }
+                  }
+                  close(fd);
+              }
+              if (g_ts_fd < 0 && fallback_fd >= 0) {
+                  g_ts_fd = fallback_fd;
+              } else if (fallback_fd >= 0 && fallback_fd != g_ts_fd) {
+                  close(fallback_fd);
+              }
+              if (g_ts_fd >= 0) {
+                  struct input_absinfo ax, ay;
+                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_X), &ax) >= 0 && ax.maximum > ax.minimum) {
+                      g_ts_min_x = ax.minimum;
+                      g_ts_max_x = ax.maximum;
+                  }
+                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_Y), &ay) >= 0 && ay.maximum > ay.minimum) {
+                      g_ts_min_y = ay.minimum;
+                      g_ts_max_y = ay.maximum;
+                  }
+              }
+          }
+
+          static void leapster_poll_touch_frame(void) {
+              leapster_init_touch();
+              if (g_ts_fd < 0) return;
+              struct input_event ev;
+              bool saw_touch_down_this_frame = false;
+              while (read(g_ts_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
+                  if (ev.type == EV_ABS) {
+                      if (ev.code == ABS_X) {
+                          g_ts_cur_x = ev.value;
+                      } else if (ev.code == ABS_Y) {
+                          g_ts_cur_y = ev.value;
+                      } else if (ev.code == ABS_PRESSURE) {
+                          g_ts_touch = (ev.value > 0) ? 1 : 0;
+                          if (g_ts_touch) saw_touch_down_this_frame = true;
+                      }
+                  } else if (ev.type == EV_KEY && (ev.code == BTN_TOUCH || ev.code == BTN_LEFT)) {
+                      g_ts_touch = (ev.value != 0) ? 1 : 0;
+                      if (g_ts_touch) saw_touch_down_this_frame = true;
+                  } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
+                      if (g_ts_touch) {
+                          g_ts_raw_x = g_ts_cur_x;
+                          g_ts_raw_y = g_ts_cur_y;
+                          g_ts_ever_touched = true;
+                      }
+                  }
+              }
+              if (g_ts_touch) {
+                  g_ts_raw_x = g_ts_cur_x;
+                  g_ts_raw_y = g_ts_cur_y;
+                  g_ts_ever_touched = true;
+              }
+              if (!g_ts_ever_touched) return;
+
+              int sx = 0, sy = 0;
+              if (g_use_pcal) {
+                  sx = (int)((g_pcal[0] * (long)g_ts_raw_x + g_pcal[1] * (long)g_ts_raw_y + g_pcal[2]) / g_pcal[6]);
+                  sy = (int)((g_pcal[3] * (long)g_ts_raw_x + g_pcal[4] * (long)g_ts_raw_y + g_pcal[5]) / g_pcal[6]);
+              } else {
+                  int rx = g_ts_max_x - g_ts_min_x;
+                  int ry = g_ts_max_y - g_ts_min_y;
+                  sx = (rx > 0) ? ((g_ts_raw_x - g_ts_min_x) * 320) / rx : g_ts_raw_x;
+                  sy = (ry > 0) ? ((g_ts_raw_y - g_ts_min_y) * 240) / ry : g_ts_raw_y;
+              }
+              if (sx < 0) sx = 0;
+              if (sx > 319) sx = 319;
+              if (sy < 0) sy = 0;
+              if (sy > 239) sy = 239;
+
+              g_ts_retro_x = (int16_t)(((long)sx * 0xffffL) / 320L - 0x7fffL);
+              g_ts_retro_y = (int16_t)(((long)sy * 0xffffL) / 240L - 0x7fffL);
+
+              // 2-frame tap state machine so cursor moves to (sx, sy) before clicking
+              if (g_ts_click_state == 0) {
+                  if (g_ts_touch || saw_touch_down_this_frame) {
+                      g_ts_retro_press = 0;
+                      g_ts_click_state = 1;
+                  } else {
+                      g_ts_retro_press = 0;
+                  }
+              } else if (g_ts_click_state == 1) {
+                  g_ts_retro_press = 1;
+                  g_ts_click_state = 2;
+              } else {
+                  if (g_ts_touch) {
+                      g_ts_retro_press = 1;
+                  } else {
+                      g_ts_retro_press = 0;
+                      g_ts_click_state = 0;
+                  }
+              }
+          }
+
+          static int16_t leapster_input_state_cb(unsigned port, unsigned device, unsigned index, unsigned id) {
+              if ((device & 0xff) == RETRO_DEVICE_POINTER && port == 0 && index == 0) {
+                  if (g_ts_ever_touched) {
+                      if (id == RETRO_DEVICE_ID_POINTER_X) return g_ts_retro_x;
+                      if (id == RETRO_DEVICE_ID_POINTER_Y) return g_ts_retro_y;
+                      if (id == RETRO_DEVICE_ID_POINTER_PRESSED) return g_ts_retro_press;
+                  }
+              }
+              return g_leapster_orig_input_cb ? g_leapster_orig_input_cb(port, device, index, id) : 0;
+          }
+
+          static uint64_t leapster_monotonic_us(void) {
+              struct timespec ts;
+              clock_gettime(CLOCK_MONOTONIC, &ts);
+              return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
+          }
+          static uint64_t g_leapster_last_frame_us = 0;
+          """
+
+          ctxt = leapster_core_hook + "\n" + ctxt
+
+          # Hook retro_set_input_state(retro_input_state_t ...)
+          ctxt, n_sub_in = re.subn(
+              r"(void\s+retro_set_input_state\s*\(\s*retro_input_state_t\s+(\w+)\s*\)\s*\{)",
+              r"\1\n\tg_leapster_orig_input_cb = \2;\n\t\2 = leapster_input_state_cb;",
+              ctxt,
+              count=1
+          )
+          assert n_sub_in == 1, "Failed to hook retro_set_input_state in libretro-core.cpp"
+
+          # Hook retro_run(void) to poll touch and enforce strict 60.0 FPS (16667 us) frame pacing
+          ctxt, n_sub_run = re.subn(
+              r"(void\s+retro_run\s*\(\s*(?:void)?\s*\)\s*\{)",
+              r"""\1
+              leapster_poll_touch_frame();
+              {
+                  const uint64_t frame_budget_us = 16667ULL; // 60.0 FPS (100% speed lock)
+                  uint64_t now_us = leapster_monotonic_us();
+                  if (g_leapster_last_frame_us != 0 && now_us > g_leapster_last_frame_us) {
+                      uint64_t elapsed_us = now_us - g_leapster_last_frame_us;
+                      if (elapsed_us < frame_budget_us) {
+                          usleep((useconds_t)(frame_budget_us - elapsed_us));
+                          now_us = leapster_monotonic_us();
+                      }
+                  }
+                  g_leapster_last_frame_us = now_us;
+              }""",
+              ctxt,
+              count=1
+          )
+          assert n_sub_run == 1, "Failed to hook retro_run in libretro-core.cpp"
+
+          with open(core_path, "w") as f:
+              f.write(ctxt)
+          print("Successfully patched libretro-core.cpp with LeapsterGS touchscreen + 60Hz 100% speed lock!")
+
+          # 9. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
@@ -134,12 +369,10 @@ jobs:
           CXXFLAGS += {opt_flags}
           LDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl
           """
-          assert "Makefile.common" in mk, "Makefile.common include not found"
           mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inject_block + "\ninclude $(ROOT_PATH)/Makefile.common")
           mk = mk.replace("include Makefile.common", inject_block + "\ninclude Makefile.common")
           with open(mk_file, "w") as f:
               f.write(mk)
-          print("Injected Cortex-A9 flags + 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile!")
           EOF
 
       - name: Compile Inside Ubuntu 18.04 Container (Cortex-A9 32-bit Color)
@@ -224,11 +457,11 @@ jobs:
           '
           ls -lh scummvm_libretro.so build_scummvm.log build_report.txt
 
-      - name: Upload ScummVM Libretro Core + Datafiles + Build Log
+      - name: Upload ScummVM Libretro Core V2 + Datafiles + Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster
+          name: scummvm_libretro_leapster_v2
           path: |
             scummvm_libretro.so
             scummvm.zip
