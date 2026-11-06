@@ -137,12 +137,13 @@ jobs:
                           print(f"Patched settings in {fpath}!")
 
           # 9. Patch OSystem_libretro::getMillis, OSystem_libretro::delayMillis, and updateScreen
+          #    Use built-in `unsigned int` so no `<stdint.h>` header is required before extern_decls
           extern_decls = r"""
           extern "C" {
-              uint32_t leapster_hw_get_millis(void);
-              void leapster_telem_delay(uint32_t req_ms, uint32_t actual_ms);
+              unsigned int leapster_hw_get_millis(void);
+              void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms);
               void leapster_telem_update_screen(void);
-              void leapster_sleep_us(uint32_t us);
+              void leapster_sleep_us(unsigned int us);
           }
           """
 
@@ -226,11 +227,7 @@ jobs:
                           modified = True
 
                   if modified:
-                      m_first = re.search(r"^[A-Za-z0-9_:*&\s]+OSystem_[A-Za-z0-9_]+::", txt, flags=re.M)
-                      if m_first:
-                          txt = txt[:m_first.start()] + extern_decls + "\n" + txt[m_first.start():]
-                      else:
-                          txt = extern_decls + "\n" + txt
+                      txt = extern_decls + "\n" + txt
                       with open(fpath, "w") as f:
                           f.write(txt)
                       print(f"Patched timing/telemetry hooks in {fpath}!")
@@ -287,17 +284,17 @@ jobs:
               return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
           }
 
-          extern "C" uint32_t leapster_hw_get_millis(void) {
+          extern "C" unsigned int leapster_hw_get_millis(void) {
               uint64_t now_us = leapster_monotonic_us();
               if (g_telem_start_us == 0) g_telem_start_us = now_us;
-              return (uint32_t)((now_us - g_telem_start_us) / 1000ULL);
+              return (unsigned int)((now_us - g_telem_start_us) / 1000ULL);
           }
 
-          extern "C" void leapster_sleep_us(uint32_t us) {
+          extern "C" void leapster_sleep_us(unsigned int us) {
               usleep((useconds_t)us);
           }
 
-          extern "C" void leapster_telem_delay(uint32_t req_ms, uint32_t actual_ms) {
+          extern "C" void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms) {
               g_telem_delay_calls++;
               g_telem_delay_req_ms += req_ms;
               g_telem_delay_actual_ms += actual_ms;
