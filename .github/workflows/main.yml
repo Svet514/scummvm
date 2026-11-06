@@ -16,9 +16,12 @@ jobs:
             set -e
             set -o pipefail
 
-            # 1. Install ARMv7 softfp cross-compiler and build tools (No SDL, X11, or ALSA needed!)
+            # 1. Install ARMv7 softfp cross-compiler, git (required by configure_submodules.sh), and build tools
             apt-get update
             apt-get install -y \
+              git \
+              ca-certificates \
+              pkg-config \
               gcc-arm-linux-gnueabi \
               g++-arm-linux-gnueabi \
               binutils-arm-linux-gnueabi \
@@ -31,37 +34,91 @@ jobs:
               gawk \
               python3
 
-            # 2. Download and extract official ScummVM v2026.4.0 source
-            rm -rf scummvm-2026.4.0 scummvm.tar.gz
-            wget -q https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
-            tar -xzf scummvm.tar.gz
+            # 2. Clone official ScummVM v2026.4.0 with .git metadata intact for Libretro scripts
+            rm -rf scummvm-2026.4.0
+            git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
             cd scummvm-2026.4.0
 
-            # 3. Restrict Libretro build strictly to the SCUMM engine (+ v7/v8 and HE sub-engines)
-            cat << "EOF" > backends/platform/libretro/engines.lite
-          scumm
-          scumm_7_8
-          he
-          EOF
-
-            # Also patch configure/engines.mk fallback so even if LITE is not read, only scumm is enabled
+            # 3. Configure strictly for SCUMM engine, disable OpenGL & host x86_64 shared libs, and inject Cortex-A9 flags
             python3 - << "PYEOF"
-          import os, re
+          import os
+          import re
 
-          mk_path = "backends/platform/libretro/Makefile.common"
-          with open(mk_path, "r") as f:
-              txt = f.read()
+          # 3A. Write ONLY scumm (+ v7/v8 and HE sub-engines) to lite_engines.list and engines.lite
+          lite_content = "scumm\nscumm_7_8\nhe\n"
+          for list_name in ["lite_engines.list", "engines.lite"]:
+              p = os.path.join("backends/platform/libretro", list_name)
+              with open(p, "w") as f:
+                  f.write(lite_content)
 
-          # Ensure HIGH_DEF is disabled so RGB565 16-bit color & 320x240 native cursor speed are used
-          txt = txt.replace("HIGH_DEF := 1", "HIGH_DEF := 0")
-          with open(mk_path, "w") as f:
-              f.write(txt)
-          print("Verified backends/platform/libretro/Makefile.common!")
+          # 3B. Also strip non-SCUMM engines directly in engines/engines.mk so only SCUMM can ever be enabled
+          eng_mk = "engines/engines.mk"
+          if os.path.exists(eng_mk):
+              with open(eng_mk, "r") as f:
+                  emk = f.read()
+              # Comment out any default ENABLE_<ENGINE> = STATIC_PLUGIN except SCUMM, SCUMM_7_8, HE
+              def filter_engine(match):
+                  eng = match.group(1)
+                  if eng in ("SCUMM", "SCUMM_7_8", "HE"):
+                      return match.group(0)
+                  return f"# {match.group(0)}"
+              emk = re.sub(r"^(\s*ENABLE_([A-Z0-9_]+)\s*=\s*STATIC_PLUGIN)", lambda m: m.group(0) if m.group(2) in ("SCUMM", "SCUMM_7_8", "HE") else "# " + m.group(0), emk, flags=re.M)
+              with open(eng_mk, "w") as f:
+                  f.write(emk)
+              print("Restricted engines/engines.mk to SCUMM only!")
+
+          # 3C. Patch backends/platform/libretro/dependencies.mk to never link host x86_64 shared libraries
+          dep_mk = "backends/platform/libretro/dependencies.mk"
+          if os.path.exists(dep_mk):
+              with open(dep_mk, "r") as f:
+                  dmk = f.read()
+              # Force sharedlib_test.mk checks off when cross-compiling for ARM
+              dmk = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", dmk)
+              with open(dep_mk, "w") as f:
+                  f.write(dmk)
+              print("Disabled host shared library probing in dependencies.mk!")
+
+          # 3D. Patch backends/platform/libretro/Makefile.common (disable HIGH_DEF & OpenGL)
+          mk_common = "backends/platform/libretro/Makefile.common"
+          with open(mk_common, "r") as f:
+              mc = f.read()
+          mc = mc.replace("HIGH_DEF := 1", "HIGH_DEF := 0")
+          mc = mc.replace("OPENGL_SUPPORT := 1", "OPENGL_SUPPORT := 0")
+          mc = mc.replace("USE_OPENGL := 1", "USE_OPENGL := 0")
+          with open(mk_common, "w") as f:
+              f.write(mc)
+
+          # 3E. Patch backends/platform/libretro/Makefile:
+          #     - Force OPENGL_SUPPORT := 0 and TARGET_64BIT := 0
+          #     - Inject Cortex-A9 OPT_FLAGS and static libstdc++/libgcc
+          mk_file = "backends/platform/libretro/Makefile"
+          with open(mk_file, "r") as f:
+              mk = f.read()
+          mk = mk.replace("OPENGL_SUPPORT := 1", "OPENGL_SUPPORT := 0")
+          mk = mk.replace("OPENGL_SUPPORT = 1", "OPENGL_SUPPORT = 0")
+
+          opt_flags = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -fPIC"
+
+          inject_block = f"""
+          TARGET_64BIT := 0
+          OPENGL_SUPPORT := 0
+          USE_OPENGL := 0
+          HAVE_OPENGL := 0
+          HAVE_NEON := 0
+          CFLAGS += {opt_flags}
+          CXXFLAGS += {opt_flags}
+          LDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl
+          """
+          # Insert right before include Makefile.common
+          assert "include Makefile.common" in mk or "Makefile.common" in mk, "Makefile.common include not found"
+          mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inject_block + "\ninclude $(ROOT_PATH)/Makefile.common")
+          mk = mk.replace("include Makefile.common", inject_block + "\ninclude Makefile.common")
+          with open(mk_file, "w") as f:
+              f.write(mk)
+          print("Patched backends/platform/libretro/Makefile and Makefile.common!")
           PYEOF
 
-            # 4. Cortex-A9 (NXP3200 / LF2000) hardware optimization flags (VFPv3-D16, softfp, no NEON)
-            OPT_FLAGS="-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -fPIC"
-
+            # 4. Export cross-compiler tools (do not pass CFLAGS on make CLI so internal Makefile += rules work)
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
             export AR="arm-linux-gnueabi-ar"
@@ -69,25 +126,23 @@ jobs:
             export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
 
-            export CFLAGS="$OPT_FLAGS"
-            export CXXFLAGS="$OPT_FLAGS -fno-rtti"
-            export LDFLAGS="-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
-
-            # 5. Build scummvm_libretro.so and auxiliary datafiles (scummvm.zip + scummvm_libretro.info)
             cd backends/platform/libretro
 
+            # 5. Step 1: Pre-configure submodules and engines first so any script output is clearly visible
             make \
               platform=unix \
               ARCH=arm \
+              TARGET_64BIT=0 \
               CC="$CC" \
               CXX="$CXX" \
               AR="$AR" \
               LD="$LD" \
-              CFLAGS="$CFLAGS" \
-              CXXFLAGS="$CXXFLAGS" \
-              LDFLAGS="$LDFLAGS" \
               LITE=1 \
+              LITE_BUILD=1 \
               NO_WIP=1 \
+              OPENGL_SUPPORT=0 \
+              USE_OPENGL=0 \
+              HAVE_OPENGL=0 \
               USE_MT32EMU=0 \
               USE_FLUIDSYNTH=0 \
               USE_FLAC=0 \
@@ -102,6 +157,7 @@ jobs:
               USE_ZLIB=1 \
               USE_CLOUD=0 \
               USE_LIBCURL=0 \
+              USE_FRIBIDI=0 \
               HAVE_NEON=0 \
               -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
 
