@@ -103,7 +103,6 @@ jobs:
                   f.write(sh_txt)
 
           # 7. Dump upstream libretro-os-events.cpp, libretro-os-utils.cpp, and libretro-timer.cpp
-          #    into ../upstream_timing_dump.txt so we can inspect them in build_report.txt
           with open("../upstream_timing_dump.txt", "w") as dump_f:
               for tfile in [
                   "backends/platform/libretro/src/libretro-os-events.cpp",
@@ -137,10 +136,8 @@ jobs:
                               f.write(new_stxt)
                           print(f"Patched settings in {fpath}!")
 
-          # 9. Patch OSystem_libretro::getMillis, OSystem_libretro::delayMillis, and OSystem_libretro::updateScreen
-          #    across backends/platform/libretro/src/*.cpp to enforce true hardware monotonic wall-clock delays
-          #    and feed live telemetry counters.
-          extern_decls = """
+          # 9. Patch OSystem_libretro::getMillis, OSystem_libretro::delayMillis, and updateScreen
+          extern_decls = r"""
           extern "C" {
               uint32_t leapster_hw_get_millis(void);
               void leapster_telem_delay(uint32_t req_ms, uint32_t actual_ms);
@@ -163,7 +160,6 @@ jobs:
 
                   modified = False
 
-                  # 9A. Patch OSystem_libretro::getMillis
                   if "OSystem_libretro::getMillis" in txt:
                       txt, n = re.subn(
                           r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)",
@@ -175,10 +171,6 @@ jobs:
                           patched_getmillis += n
                           modified = True
 
-                  # 9B. Patch OSystem_libretro::delayMillis
-                  #     Find the entire function body of OSystem_libretro::delayMillis and replace it
-                  #     with a strict monotonic loop that calls checkThread() and sleeps 1ms until
-                  #     the full requested `msecs` has elapsed in real wall-clock time!
                   m_delay = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", txt)
                   if m_delay:
                       param_name = m_delay.group(1)
@@ -196,36 +188,36 @@ jobs:
                                   break
                       assert end_idx != -1, "Could not find closing brace of delayMillis"
                       orig_delay_body = txt[brace_idx:end_idx]
-                      # Extract how checkThread is invoked in the original function
                       m_chk = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", orig_delay_body)
                       chk_call = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread()"
 
-                      new_delay_fn = f"""void OSystem_libretro::delayMillis(uint {param_name}) {{
-          \tuint32 start_time = getMillis();
-          \tuint32 elapsed_time = 0;
-          \t_threadSwitchCaller = THREAD_SWITCH_DELAY;
-          \tif ({param_name} == 0) {{
-          \t\t{chk_call};
-          \t\treturn;
-          \t}}
-          \twhile (elapsed_time < {param_name}) {{
-          \t\t{chk_call};
-          \t\telapsed_time = getMillis() - start_time;
-          \t\tif (elapsed_time < {param_name}) {{
-          \t\t\tleapster_sleep_us(1000);
-          \t\t\telapsed_time = getMillis() - start_time;
-          \t\t}}
-          \t}}
-          \tleapster_telem_delay({param_name}, elapsed_time);
-          }}"""
+                      new_delay_fn = (
+                          f"void OSystem_libretro::delayMillis(uint {param_name}) {{\n"
+                          f"\tuint32 start_time = getMillis();\n"
+                          f"\tuint32 elapsed_time = 0;\n"
+                          f"\t_threadSwitchCaller = THREAD_SWITCH_DELAY;\n"
+                          f"\tif ({param_name} == 0) {{\n"
+                          f"\t\t{chk_call};\n"
+                          f"\t\treturn;\n"
+                          f"\t}}\n"
+                          f"\twhile (elapsed_time < {param_name}) {{\n"
+                          f"\t\t{chk_call};\n"
+                          f"\t\telapsed_time = getMillis() - start_time;\n"
+                          f"\t\tif (elapsed_time < {param_name}) {{\n"
+                          f"\t\t\tleapster_sleep_us(1000);\n"
+                          f"\t\t\telapsed_time = getMillis() - start_time;\n"
+                          f"\t\t}}\n"
+                          f"\t}}\n"
+                          f"\tleapster_telem_delay({param_name}, elapsed_time);\n"
+                          f"}}"
+                      )
                       txt = txt[:start_idx] + new_delay_fn + txt[end_idx:]
                       patched_delaymillis += 1
                       modified = True
 
-                  # 9C. Hook OSystem_libretro::updateScreen for telemetry
-                  if "OSystem_libretro::updateScreen" in txt:
+                  if "::updateScreen" in txt:
                       txt, n = re.subn(
-                          r"(void\s+OSystem_libretro::updateScreen\s*\(\s*(?:void)?\s*\)\s*\{)",
+                          r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)",
                           r"\1\n\tleapster_telem_update_screen();",
                           txt,
                           count=1
@@ -235,8 +227,7 @@ jobs:
                           modified = True
 
                   if modified:
-                      # Insert extern_decls right before first OSystem_libretro:: method
-                      m_first = re.search(r"^[A-Za-z0-9_:*&\s]+OSystem_libretro::", txt, flags=re.M)
+                      m_first = re.search(r"^[A-Za-z0-9_:*&\s]+OSystem_[A-Za-z0-9_]+::", txt, flags=re.M)
                       if m_first:
                           txt = txt[:m_first.start()] + extern_decls + "\n" + txt[m_first.start():]
                       else:
@@ -249,16 +240,12 @@ jobs:
           assert patched_delaymillis >= 1, "Failed to patch OSystem_libretro::delayMillis!"
           print(f"Summary: patched getMillis={patched_getmillis}, delayMillis={patched_delaymillis}, updateScreen={patched_updatescreen}")
 
-          # 10. Patch backends/platform/libretro/src/libretro-core.cpp:
-          #     - Implement leapster_hw_get_millis(), leapster_telem_delay(), leapster_telem_update_screen(), leapster_sleep_us()
-          #     - Direct LeapsterGS /dev/input/event* touchscreen + /etc/pointercal reader
-          #     - 60.0 Hz frame limiter in retro_run()
-          #     - Live telemetry logger writing to /roms/scummvm_telemetry.log every 1 second
+          # 10. Patch backends/platform/libretro/src/libretro-core.cpp using raw string r"""..."""
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
 
-          leapster_core_hook = """
+          leapster_core_hook = r"""
           #include <fcntl.h>
           #include <unistd.h>
           #include <stdio.h>
