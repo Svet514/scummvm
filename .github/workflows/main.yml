@@ -13,17 +13,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile ScummVM Inside Ubuntu 18.04 Container (Cortex-A9 Optimized)
+      - name: Compile ScummVM Inside Ubuntu 18.04 Container
         run: |
           docker run --rm -v "$PWD:/work" -w /work ubuntu:18.04 bash -c '
             set -e
             set -o pipefail
             
-            # 1. Install toolchain and basic dependencies (adding native X11 headers to satisfy SDL_syswm.h)
             apt-get update
             apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libx11-dev libxext-dev
 
-            # 2. Bypass APT multi-arch dependency hell by manually extracting the ARM SDL libraries.
             mkdir -p /tmp/sdl
             wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2-dev_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-dev.deb
             wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2debian_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-lib.deb
@@ -33,18 +31,13 @@ jobs:
             mkdir -p /usr/arm-linux-gnueabi/include /usr/arm-linux-gnueabi/lib
             cp -R /tmp/sdl/usr/include/* /usr/arm-linux-gnueabi/include/
             cp -R /tmp/sdl/usr/lib/arm-linux-gnueabi/* /usr/arm-linux-gnueabi/lib/
-            
-            # Provide the standard X11 headers to the ARM cross-compiler to pass the syntax check
             cp -R /usr/include/X11 /usr/arm-linux-gnueabi/include/
             
-            # Recreate the symlink manually to ensure it points correctly within the cross-compiler directory
             cd /usr/arm-linux-gnueabi/lib
             ln -sf libSDL-1.2.so.0.11.4 libSDL.so
             ln -sf libSDL-1.2.so.0.11.4 libSDL-1.2.so.0
             cd /work
             
-            # Create an sdl-config wrapper so ScummVM configure script finds the library
-            # Embed -Wl,--allow-shlib-undefined directly into the output to force the linker to ignore missing X11/ALSA dependencies.
             echo "#!/bin/sh" > /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--cflags\" ]; then echo \"-I/usr/arm-linux-gnueabi/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT\"; fi" >> /usr/bin/sdl-config
             echo "if [ \"\$1\" = \"--libs\" ]; then echo \"-L/usr/arm-linux-gnueabi/lib -lSDL -lpthread -Wl,--allow-shlib-undefined\"; fi" >> /usr/bin/sdl-config
@@ -53,12 +46,14 @@ jobs:
             chmod +x /usr/bin/sdl-config
             export SDL_CONFIG=/usr/bin/sdl-config
             
-            # 3. Download and extract target release
             wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
             tar -xzf scummvm.tar.gz
             cd scummvm-2026.4.0
             
-            # 4. Setup strict hardware optimization flags
+            # --- CRITICAL HARDWARE PATCH ---
+            # Erase the joystick initialization flag across the entire codebase to bypass the kernel lock
+            find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i "s/SDL_INIT_JOYSTICK/0/g" {} +
+            
             OPT_FLAGS="-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG"
             
             export CC="arm-linux-gnueabi-gcc"
@@ -70,7 +65,6 @@ jobs:
             export CXXFLAGS="$OPT_FLAGS -DHAVE_NEON=0 -static-libstdc++ -static-libgcc"
             export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -Wl,--allow-shlib-undefined"
             
-            # 5. Configure for minimal Scumm engine footprint and strip the ALSA audio driver
             ./configure \
               --host=arm-linux-gnueabi \
               --backend=sdl \
@@ -90,22 +84,15 @@ jobs:
               --disable-bink \
               --enable-release
             
-            # 6. Build, strip, and export
             make -j$(nproc) 2>&1 | tee ../build_scummvm.log
             $STRIP -s scummvm
             
             cp scummvm ../scummvm_leapster
-            
-            # Export the required GUI data files to prevent the warning-dialog freeze
             cp gui/themes/*.zip ../ || true
             cp gui/themes/*.dat ../ || true
             cp po/translations.dat ../ || true
-            
-            ls -lh ../scummvm_leapster >> ../build_report.txt
           '
-          ls -lh scummvm_leapster build_scummvm.log build_report.txt
-
-      - name: Upload ScummVM Binary + Build Log + Diff Report
+      - name: Upload Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -113,6 +100,5 @@ jobs:
           path: |
             scummvm_leapster
             build_scummvm.log
-            build_report.txt
             *.zip
             *.dat
