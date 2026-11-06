@@ -39,7 +39,7 @@ jobs:
             git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
             cd scummvm-2026.4.0
 
-            # 3. Configure strictly for SCUMM engine, keep 32-bit color (HIGH_DEF=1), and disable curl/cloud/alsa/opengl
+            # 3. Configure strictly for SCUMM engine, keep 32-bit color (HIGH_DEF=1), and disable imgui/curl/cloud/alsa/opengl
             python3 - << "PYEOF"
           import os
           import re
@@ -51,30 +51,38 @@ jobs:
               with open(p, "w") as f:
                   f.write(lite_content)
 
-          # 3B. Disable non-SCUMM engines in engines/engines.mk if present
-          eng_mk = "engines/engines.mk"
-          if os.path.exists(eng_mk):
-              with open(eng_mk, "r") as f:
-                  emk = f.read()
-              emk = re.sub(
-                  r"^(\s*ENABLE_([A-Z0-9_]+)\s*=\s*STATIC_PLUGIN)",
-                  lambda m: m.group(0) if m.group(2) in ("SCUMM", "SCUMM_7_8", "HE") else "# " + m.group(0),
-                  emk,
-                  flags=re.M
-              )
-              with open(eng_mk, "w") as f:
-                  f.write(emk)
-              print("Restricted engines/engines.mk to SCUMM only!")
+          # 3B. Stub out imgui, networking, and cloud module.mk files so they are never compiled
+          for mod_mk in [
+              "backends/imgui/module.mk",
+              "backends/networking/basic/module.mk",
+              "backends/networking/curl/module.mk",
+              "backends/networking/http/module.mk",
+              "backends/networking/sdl_net/module.mk",
+              "backends/cloud/module.mk"
+          ]:
+              if os.path.exists(mod_mk):
+                  with open(mod_mk, "w") as f:
+                      f.write("# Disabled for Leapster build\n")
+                  print(f"Stubbed {mod_mk}!")
 
-          # 3C. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
+          # 3C. Remove imgui component from root configure script so configure_engines.sh never enables USE_IMGUI
+          if os.path.exists("configure"):
+              with open("configure", "r", errors="ignore") as f:
+                  cfg = f.read()
+              cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
+              with open("configure", "w") as f:
+                  f.write(cfg)
+              print("Removed imgui component from root configure!")
+
+          # 3D. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
           disable_vars = [
-              "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
+              "USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
               "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH",
               "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC",
-              "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD",
+              "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD",
               "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_BINK", "USE_TTS",
-              "USE_DISCORD", "USE_RETROACHIEVEMENTS", "OPENGL_SUPPORT", "USE_OPENGL",
-              "HAVE_OPENGL"
+              "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY",
+              "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"
           ]
 
           for mk_rel in [
@@ -92,9 +100,7 @@ jobs:
                       f.write(txt)
                   print(f"Sanitized {mk_rel}!")
 
-          # 3D. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all module.mk files and Makefile.common
-          #     In GNU Make, `ifdef VAR` is TRUE even when `VAR := 0`! Converting to `ifeq ($(VAR), 1)`
-          #     ensures disabled features (like USE_LIBCURL := 0) evaluate to FALSE without altering Makefile structure.
+          # 3E. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all .mk files and Makefiles
           var_pattern = "|".join(disable_vars)
           ifdef_re = re.compile(rf"^(\s*)ifdef\s+({var_pattern})\s*$", flags=re.M)
           ifndef_re = re.compile(rf"^(\s*)ifndef\s+({var_pattern})\s*$", flags=re.M)
@@ -114,7 +120,7 @@ jobs:
                           patched_mk_count += 1
           print(f"Converted ifdef -> ifeq ($(VAR), 1) in {patched_mk_count} makefiles!")
 
-          # 3E. Patch scripts/configure_engines.sh to disable curl, cloud, basic-net, and alsa
+          # 3F. Patch scripts/configure_engines.sh to strip USE_IMGUI / USE_LIBCURL / USE_CLOUD / USE_FREETYPE2
           cfg_sh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(cfg_sh):
               with open(cfg_sh, "r") as f:
@@ -123,11 +129,13 @@ jobs:
               sh_txt = sh_txt.replace("--enable-cloud", "--disable-cloud")
               sh_txt = sh_txt.replace("--enable-basic-net", "--disable-basic-net")
               sh_txt = sh_txt.replace("--enable-alsa", "--disable-alsa")
+              # Also strip any auto-added USE_IMGUI from generated config.mk.engines
+              sh_txt += "\nsed -i '/USE_IMGUI/d; /USE_LIBCURL/d; /USE_CLOUD/d; /USE_FREETYPE2/d' config.mk.engines 2>/dev/null || true\n"
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
               print("Patched scripts/configure_engines.sh!")
 
-          # 3F. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
+          # 3G. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
@@ -140,6 +148,7 @@ jobs:
           OPENGL_SUPPORT := 0
           USE_OPENGL := 0
           HAVE_OPENGL := 0
+          USE_IMGUI := 0
           USE_CURL := 0
           USE_LIBCURL := 0
           USE_CLOUD := 0
@@ -184,6 +193,7 @@ jobs:
               OPENGL_SUPPORT=0 \
               USE_OPENGL=0 \
               HAVE_OPENGL=0 \
+              USE_IMGUI=0 \
               USE_CURL=0 \
               USE_LIBCURL=0 \
               USE_CLOUD=0 \
