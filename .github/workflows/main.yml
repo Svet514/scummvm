@@ -94,6 +94,12 @@ jobs:
             $STRIP -s scummvm
             
             cp scummvm ../scummvm_leapster
+            
+            # Export the required GUI data files to prevent the warning-dialog freeze
+            cp gui/themes/*.zip ../ || true
+            cp gui/themes/*.dat ../ || true
+            cp po/translations.dat ../ || true
+            
             ls -lh ../scummvm_leapster >> ../build_report.txt
           '
           ls -lh scummvm_leapster build_scummvm.log build_report.txt
@@ -107,3 +113,5 @@ jobs:
             scummvm_leapster
             build_scummvm.log
             build_report.txt
+            *.zip
+            *.dat
