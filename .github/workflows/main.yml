@@ -1,104 +1,130 @@
-name: Build ScummVM Leapster
+name: Build ScummVM Libretro Core (Leapster Cortex-A9 Optimized)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    runs-on: ubuntu-22.04
 
-      - name: Compile ScummVM Inside Ubuntu 18.04 Container
+    steps:
+      - name: Compile ScummVM Libretro Core Inside Ubuntu 18.04 Container
         run: |
           docker run --rm -v "$PWD:/work" -w /work ubuntu:18.04 bash -c '
             set -e
             set -o pipefail
-            
-            apt-get update
-            apt-get install -y gcc-arm-linux-gnueabi g++-arm-linux-gnueabi make wget tar pkg-config libx11-dev libxext-dev
 
-            mkdir -p /tmp/sdl
-            wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2-dev_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-dev.deb
-            wget http://archive.debian.org/debian/pool/main/libs/libsdl1.2/libsdl1.2debian_1.2.15+dfsg2-6~deb10u1_armel.deb -O /tmp/sdl-lib.deb
-            dpkg -x /tmp/sdl-dev.deb /tmp/sdl
-            dpkg -x /tmp/sdl-lib.deb /tmp/sdl
-            
-            mkdir -p /usr/arm-linux-gnueabi/include /usr/arm-linux-gnueabi/lib
-            cp -R /tmp/sdl/usr/include/* /usr/arm-linux-gnueabi/include/
-            cp -R /tmp/sdl/usr/lib/arm-linux-gnueabi/* /usr/arm-linux-gnueabi/lib/
-            cp -R /usr/include/X11 /usr/arm-linux-gnueabi/include/
-            
-            cd /usr/arm-linux-gnueabi/lib
-            ln -sf libSDL-1.2.so.0.11.4 libSDL.so
-            ln -sf libSDL-1.2.so.0.11.4 libSDL-1.2.so.0
-            cd /work
-            
-            echo "#!/bin/sh" > /usr/bin/sdl-config
-            echo "if [ \"\$1\" = \"--cflags\" ]; then echo \"-I/usr/arm-linux-gnueabi/include/SDL -D_GNU_SOURCE=1 -D_REENTRANT\"; fi" >> /usr/bin/sdl-config
-            echo "if [ \"\$1\" = \"--libs\" ]; then echo \"-L/usr/arm-linux-gnueabi/lib -lSDL -lpthread -Wl,--allow-shlib-undefined\"; fi" >> /usr/bin/sdl-config
-            echo "if [ \"\$1\" = \"--version\" ]; then echo \"1.2.15\"; fi" >> /usr/bin/sdl-config
-            echo "if [ \"\$1\" = \"--prefix\" ]; then echo \"/usr/arm-linux-gnueabi\"; fi" >> /usr/bin/sdl-config
-            chmod +x /usr/bin/sdl-config
-            export SDL_CONFIG=/usr/bin/sdl-config
-            
-            wget https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
+            # 1. Install ARMv7 softfp cross-compiler and build tools (No SDL, X11, or ALSA needed!)
+            apt-get update
+            apt-get install -y \
+              gcc-arm-linux-gnueabi \
+              g++-arm-linux-gnueabi \
+              binutils-arm-linux-gnueabi \
+              make \
+              wget \
+              tar \
+              zip \
+              unzip \
+              sed \
+              gawk \
+              python3
+
+            # 2. Download and extract official ScummVM v2026.4.0 source
+            rm -rf scummvm-2026.4.0 scummvm.tar.gz
+            wget -q https://github.com/scummvm/scummvm/archive/refs/tags/v2026.4.0.tar.gz -O scummvm.tar.gz
             tar -xzf scummvm.tar.gz
             cd scummvm-2026.4.0
-            
-            # --- CRITICAL HARDWARE PATCH ---
-            # Erase the joystick initialization flag across the entire codebase to bypass the kernel lock
-            find . -type f \( -name "*.cpp" -o -name "*.h" \) -exec sed -i "s/SDL_INIT_JOYSTICK/0/g" {} +
-            
-            OPT_FLAGS="-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG"
-            
+
+            # 3. Restrict Libretro build strictly to the SCUMM engine (+ v7/v8 and HE sub-engines)
+            cat << "EOF" > backends/platform/libretro/engines.lite
+          scumm
+          scumm_7_8
+          he
+          EOF
+
+            # Also patch configure/engines.mk fallback so even if LITE is not read, only scumm is enabled
+            python3 - << "PYEOF"
+          import os, re
+
+          mk_path = "backends/platform/libretro/Makefile.common"
+          with open(mk_path, "r") as f:
+              txt = f.read()
+
+          # Ensure HIGH_DEF is disabled so RGB565 16-bit color & 320x240 native cursor speed are used
+          txt = txt.replace("HIGH_DEF := 1", "HIGH_DEF := 0")
+          with open(mk_path, "w") as f:
+              f.write(txt)
+          print("Verified backends/platform/libretro/Makefile.common!")
+          PYEOF
+
+            # 4. Cortex-A9 (NXP3200 / LF2000) hardware optimization flags (VFPv3-D16, softfp, no NEON)
+            OPT_FLAGS="-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -fPIC"
+
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
+            export AR="arm-linux-gnueabi-ar"
             export AS="arm-linux-gnueabi-as"
+            export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
-            
-            export CFLAGS="$OPT_FLAGS -DHAVE_NEON=0"
-            export CXXFLAGS="$OPT_FLAGS -DHAVE_NEON=0 -static-libstdc++ -static-libgcc"
-            export LDFLAGS="$OPT_FLAGS -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -Wl,--allow-shlib-undefined"
-            
-            ./configure \
-              --host=arm-linux-gnueabi \
-              --backend=sdl \
-              --opengl-mode=none \
-              --disable-opengl-game-classic \
-              --disable-opengl-game-shaders \
-              --disable-alsa \
-              --disable-all-engines \
-              --enable-engine=scumm \
-              --enable-engine=queen \
-              --disable-debug \
-              --disable-cloud \
-              --disable-libcurl \
-              --disable-discord \
-              --disable-updates \
-              --disable-tts \
-              --disable-bink \
-              --enable-release
-            
-            make -j$(nproc) 2>&1 | tee ../build_scummvm.log
-            $STRIP -s scummvm
-            
-            cp scummvm ../scummvm_leapster
-            cp gui/themes/*.zip ../ || true
-            cp gui/themes/*.dat ../ || true
-            cp po/translations.dat ../ || true
+
+            export CFLAGS="$OPT_FLAGS"
+            export CXXFLAGS="$OPT_FLAGS -fno-rtti"
+            export LDFLAGS="-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
+
+            # 5. Build scummvm_libretro.so and auxiliary datafiles (scummvm.zip + scummvm_libretro.info)
+            cd backends/platform/libretro
+
+            make \
+              platform=unix \
+              ARCH=arm \
+              CC="$CC" \
+              CXX="$CXX" \
+              AR="$AR" \
+              LD="$LD" \
+              CFLAGS="$CFLAGS" \
+              CXXFLAGS="$CXXFLAGS" \
+              LDFLAGS="$LDFLAGS" \
+              LITE=1 \
+              NO_WIP=1 \
+              USE_MT32EMU=0 \
+              USE_FLUIDSYNTH=0 \
+              USE_FLAC=0 \
+              USE_VORBIS=0 \
+              USE_TREMOR=0 \
+              USE_MAD=0 \
+              USE_FAAD=0 \
+              USE_MPEG2=0 \
+              USE_THEORADEC=0 \
+              USE_FREETYPE2=0 \
+              USE_PNG=1 \
+              USE_ZLIB=1 \
+              USE_CLOUD=0 \
+              USE_LIBCURL=0 \
+              HAVE_NEON=0 \
+              -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
+
+            $STRIP -s scummvm_libretro.so
+
+            cp scummvm_libretro.so /work/scummvm_libretro.so
+            if [ -f scummvm.zip ]; then cp scummvm.zip /work/scummvm.zip; fi
+            if [ -f scummvm_libretro.info ]; then cp scummvm_libretro.info /work/scummvm_libretro.info; fi
+
+            echo "=== BUILD REPORT ===" > /work/build_report.txt
+            ls -lh /work/scummvm_libretro.so >> /work/build_report.txt
+            arm-linux-gnueabi-readelf -d /work/scummvm_libretro.so | grep NEEDED >> /work/build_report.txt
           '
-      - name: Upload Artifacts
+          ls -lh scummvm_libretro.so build_scummvm.log build_report.txt
+
+      - name: Upload ScummVM Libretro Core + Datafiles + Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_leapster_gs_binary
+          name: scummvm_libretro_leapster
           path: |
-            scummvm_leapster
+            scummvm_libretro.so
+            scummvm.zip
+            scummvm_libretro.info
             build_scummvm.log
-            *.zip
-            *.dat
+            build_report.txt
