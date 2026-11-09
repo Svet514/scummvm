@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V3 (Touch + True 100% Speed + Telemetry)
+name: Build ScummVM Libretro Core V4 (SCUMM waitForTimer Lock + Telemetry)
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Clone & Patch ScummVM v2026.4.0 (Touch + True DelayMillis + Telemetry)
+      - name: Clone & Patch ScummVM v2026.4.0 (waitForTimer Lock + Touch + Telemetry)
         run: |
           rm -rf scummvm-2026.4.0
           git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
@@ -102,17 +102,27 @@ jobs:
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
 
-          # 7. Dump upstream libretro-os-events.cpp, libretro-os-utils.cpp, and libretro-timer.cpp
+          # 7. Dump upstream libretro-graphics-surface.cpp, libretro-core.cpp, and ScummEngine::waitForTimer
           with open("../upstream_timing_dump.txt", "w") as dump_f:
               for tfile in [
-                  "backends/platform/libretro/src/libretro-os-events.cpp",
-                  "backends/platform/libretro/src/libretro-os-utils.cpp",
-                  "backends/platform/libretro/src/libretro-timer.cpp"
+                  "backends/platform/libretro/src/libretro-graphics-surface.cpp",
+                  "backends/platform/libretro/src/libretro-os-base.cpp",
+                  "backends/platform/libretro/src/libretro-core.cpp"
               ]:
                   if os.path.exists(tfile):
                       dump_f.write(f"\n==================== {tfile} ====================\n")
                       with open(tfile, "r", errors="ignore") as tf:
                           dump_f.write(tf.read())
+              scumm_cpp = "engines/scumm/scumm.cpp"
+              if os.path.exists(scumm_cpp):
+                  with open(scumm_cpp, "r", errors="ignore") as sf:
+                      stext = sf.read()
+                  m_wt = re.search(r"void\s+ScummEngine::waitForTimer\b", stext)
+                  if m_wt:
+                      s_idx = max(0, m_wt.start() - 1500)
+                      e_idx = min(len(stext), m_wt.start() + 4000)
+                      dump_f.write("\n==================== engines/scumm/scumm.cpp (waitForTimer & scummLoop) ====================\n")
+                      dump_f.write(stext[s_idx:e_idx])
 
           # 8. Force RETRO_DEVICE_POINTER and disable timing_inaccuracies across backends/platform/libretro/src/*
           for root, _, files in os.walk("backends/platform/libretro"):
@@ -136,12 +146,51 @@ jobs:
                               f.write(new_stxt)
                           print(f"Patched settings in {fpath}!")
 
-          # 9. Patch OSystem_libretro::getMillis, OSystem_libretro::delayMillis, and updateScreen
-          #    Use built-in `unsigned int` so no `<stdint.h>` header is required before extern_decls
+          # 9. Patch engines/scumm/scumm.cpp to hook ScummEngine::scummLoop and ScummEngine::waitForTimer
+          #    with an RAII guard that enforces the exact 240 Hz quarter-frame duration (qf * 4167 us)!
+          scumm_path = "engines/scumm/scumm.cpp"
+          with open(scumm_path, "r", errors="ignore") as f:
+              scumm_txt = f.read()
+
+          scumm_externs = r"""
+          extern "C" {
+              void leapster_telem_scumm_loop(int delta);
+              unsigned int leapster_wait_timer_begin(int quarterFrames);
+              void leapster_wait_timer_end(int quarterFrames, unsigned int start_us);
+          }
+          struct LeapsterWaitGuard {
+              int qf;
+              unsigned int start_us;
+              LeapsterWaitGuard(int q) : qf(q), start_us(leapster_wait_timer_begin(q)) {}
+              ~LeapsterWaitGuard() { leapster_wait_timer_end(qf, start_us); }
+          };
+          """
+
+          scumm_txt, n_sl = re.subn(
+              r"(void\s+ScummEngine::scummLoop\s*\(\s*int\s+(\w+)\s*\)\s*\{)",
+              r"\1\n\tleapster_telem_scumm_loop(\2);",
+              scumm_txt,
+              count=1
+          )
+          scumm_txt, n_wt = re.subn(
+              r"(void\s+ScummEngine::waitForTimer\s*\(\s*int\s+(\w+)[^)]*\)\s*\{)",
+              r"\1\n\tLeapsterWaitGuard _leapster_wg(\2);",
+              scumm_txt,
+              count=1
+          )
+          assert n_wt == 1, f"Failed to hook ScummEngine::waitForTimer (n_wt={n_wt})"
+          scumm_txt = scumm_externs + "\n" + scumm_txt
+          with open(scumm_path, "w") as f:
+              f.write(scumm_txt)
+          print(f"Successfully hooked ScummEngine::scummLoop ({n_sl}) and ScummEngine::waitForTimer ({n_wt})!")
+
+          # 10. Patch OSystem_libretro::getMillis, delayMillis, pollEvent, and LibretroGraphics::updateScreen
           extern_decls = r"""
           extern "C" {
               unsigned int leapster_hw_get_millis(void);
               void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms);
+              void leapster_telem_delay0(void);
+              void leapster_telem_poll(void);
               void leapster_telem_update_screen(void);
               void leapster_sleep_us(unsigned int us);
           }
@@ -150,6 +199,7 @@ jobs:
           patched_getmillis = 0
           patched_delaymillis = 0
           patched_updatescreen = 0
+          patched_pollevent = 0
 
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -170,6 +220,17 @@ jobs:
                       )
                       if n > 0:
                           patched_getmillis += n
+                          modified = True
+
+                  if "OSystem_libretro::pollEvent" in txt:
+                      txt, n = re.subn(
+                          r"(bool\s+OSystem_libretro::pollEvent\s*\([^)]*\)\s*\{)",
+                          r"\1\n\tleapster_telem_poll();",
+                          txt,
+                          count=1
+                      )
+                      if n > 0:
+                          patched_pollevent += n
                           modified = True
 
                   m_delay = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", txt)
@@ -197,16 +258,15 @@ jobs:
                           f"\tuint32 start_time = getMillis();\n"
                           f"\tuint32 elapsed_time = 0;\n"
                           f"\tif ({param_name} == 0) {{\n"
-                          f"\t\t{chk_call};\n"
+                          f"\t\tleapster_telem_delay0();\n"
+                          f"\t\tif (!{chk_call})\n"
+                          f"\t\t\tleapster_sleep_us(1000);\n"
                           f"\t\treturn;\n"
                           f"\t}}\n"
                           f"\twhile (elapsed_time < {param_name}) {{\n"
-                          f"\t\t{chk_call};\n"
-                          f"\t\telapsed_time = getMillis() - start_time;\n"
-                          f"\t\tif (elapsed_time < {param_name}) {{\n"
+                          f"\t\tif (!{chk_call})\n"
                           f"\t\t\tleapster_sleep_us(1000);\n"
-                          f"\t\t\telapsed_time = getMillis() - start_time;\n"
-                          f"\t\t}}\n"
+                          f"\t\telapsed_time = getMillis() - start_time;\n"
                           f"\t}}\n"
                           f"\tleapster_telem_delay({param_name}, elapsed_time);\n"
                           f"}}"
@@ -234,9 +294,9 @@ jobs:
 
           assert patched_getmillis >= 1, "Failed to patch OSystem_libretro::getMillis!"
           assert patched_delaymillis >= 1, "Failed to patch OSystem_libretro::delayMillis!"
-          print(f"Summary: patched getMillis={patched_getmillis}, delayMillis={patched_delaymillis}, updateScreen={patched_updatescreen}")
+          print(f"Summary: getMillis={patched_getmillis}, delayMillis={patched_delaymillis}, pollEvent={patched_pollevent}, updateScreen={patched_updatescreen}")
 
-          # 10. Patch backends/platform/libretro/src/libretro-core.cpp using raw string r"""..."""
+          # 11. Patch backends/platform/libretro/src/libretro-core.cpp
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
@@ -266,7 +326,7 @@ jobs:
           static int g_ts_click_state = 0;
           static int g_ts_last_sx = 160, g_ts_last_sy = 120;
 
-          // Telemetry state
+          // Telemetry & timing state
           static FILE *g_telem_fp = NULL;
           static uint64_t g_telem_start_us = 0;
           static uint64_t g_telem_window_start_us = 0;
@@ -274,8 +334,16 @@ jobs:
           static uint32_t g_telem_retro_runs = 0;
           static uint32_t g_telem_update_screens = 0;
           static uint32_t g_telem_delay_calls = 0;
+          static uint32_t g_telem_delay0_calls = 0;
           static uint32_t g_telem_delay_req_ms = 0;
           static uint32_t g_telem_delay_actual_ms = 0;
+          static uint32_t g_telem_poll_calls = 0;
+          static uint32_t g_telem_scumm_loops = 0;
+          static uint32_t g_telem_scumm_delta = 0;
+          static uint32_t g_telem_wt_calls = 0;
+          static uint32_t g_telem_wt_qf = 0;
+          static uint32_t g_telem_wt_req_us = 0;
+          static uint32_t g_telem_wt_wait_us = 0;
           static uint32_t g_telem_sec_counter = 0;
 
           static uint64_t leapster_monotonic_us(void) {
@@ -300,8 +368,44 @@ jobs:
               g_telem_delay_actual_ms += actual_ms;
           }
 
+          extern "C" void leapster_telem_delay0(void) {
+              g_telem_delay0_calls++;
+          }
+
+          extern "C" void leapster_telem_poll(void) {
+              g_telem_poll_calls++;
+          }
+
           extern "C" void leapster_telem_update_screen(void) {
               g_telem_update_screens++;
+          }
+
+          extern "C" void leapster_telem_scumm_loop(int delta) {
+              g_telem_scumm_loops++;
+              if (delta > 0) g_telem_scumm_delta += (uint32_t)delta;
+          }
+
+          extern "C" unsigned int leapster_wait_timer_begin(int quarterFrames) {
+              (void)quarterFrames;
+              return (unsigned int)leapster_monotonic_us();
+          }
+
+          extern "C" void leapster_wait_timer_end(int quarterFrames, unsigned int start_us) {
+              g_telem_wt_calls++;
+              if (quarterFrames <= 0) return;
+              uint32_t qf = (uint32_t)quarterFrames;
+              g_telem_wt_qf += qf;
+              // 1 quarter-frame = 1/240 sec = 4166.67 us
+              uint32_t target_us = (qf * 1000000U) / 240U;
+              g_telem_wt_req_us += target_us;
+              uint32_t now_us = (unsigned int)leapster_monotonic_us();
+              uint32_t elapsed_us = now_us - start_us;
+              if (elapsed_us < target_us) {
+                  usleep((useconds_t)(target_us - elapsed_us));
+                  now_us = (unsigned int)leapster_monotonic_us();
+                  elapsed_us = now_us - start_us;
+              }
+              g_telem_wt_wait_us += elapsed_us;
           }
 
           #define LEAP_BITS_PER_LONG (sizeof(unsigned long) * 8)
@@ -450,9 +554,9 @@ jobs:
                   g_telem_fp = fopen("/roms/scummvm_telemetry.log", "w");
                   if (!g_telem_fp) g_telem_fp = fopen("/tmp/scummvm_telemetry.log", "w");
                   if (g_telem_fp) {
-                      fprintf(g_telem_fp, "=== ScummVM LeapsterGS V3 Telemetry Log ===\n");
+                      fprintf(g_telem_fp, "=== ScummVM LeapsterGS V4 Telemetry Log ===\n");
                       fprintf(g_telem_fp, "Touchscreen device: %s | pointercal=%d\n", g_ts_dev_name, g_use_pcal);
-                      fprintf(g_telem_fp, "sec | wall_dt_ms | scumm_dt_ms | retro_fps | upd_scr | delay_calls | req_ms | wait_ms | touch(x,y,p)\n");
+                      fprintf(g_telem_fp, "sec | wall_ms | r_fps | u_scr | s_loop | wt_call | wt_qf | wt_req_ms | wt_wait_ms | d_call | d0_call | d_req | d_wait | polls | touch\n");
                       fflush(g_telem_fp);
                   }
                   g_telem_window_start_us = now_us;
@@ -463,18 +567,23 @@ jobs:
                   g_telem_sec_counter++;
                   uint32_t wall_dt_ms = (uint32_t)((now_us - g_telem_window_start_us) / 1000ULL);
                   uint32_t cur_scumm_ms = leapster_hw_get_millis();
-                  uint32_t scumm_dt_ms = cur_scumm_ms - g_telem_window_start_scumm_ms;
                   if (g_telem_fp && g_telem_sec_counter <= 600) {
                       fprintf(g_telem_fp,
-                              "%3u | %10u | %11u | %9u | %7u | %11u | %6u | %7u | (%d,%d,%d)\n",
+                              "%3u | %7u | %5u | %5u | %6u | %7u | %5u | %9u | %10u | %6u | %7u | %5u | %6u | %5u | (%d,%d,%d)\n",
                               g_telem_sec_counter,
                               wall_dt_ms,
-                              scumm_dt_ms,
                               g_telem_retro_runs,
                               g_telem_update_screens,
+                              g_telem_scumm_loops,
+                              g_telem_wt_calls,
+                              g_telem_wt_qf,
+                              g_telem_wt_req_us / 1000U,
+                              g_telem_wt_wait_us / 1000U,
                               g_telem_delay_calls,
+                              g_telem_delay0_calls,
                               g_telem_delay_req_ms,
                               g_telem_delay_actual_ms,
+                              g_telem_poll_calls,
                               g_ts_last_sx, g_ts_last_sy, (int)g_ts_retro_press);
                       fflush(g_telem_fp);
                   }
@@ -483,8 +592,16 @@ jobs:
                   g_telem_retro_runs = 0;
                   g_telem_update_screens = 0;
                   g_telem_delay_calls = 0;
+                  g_telem_delay0_calls = 0;
                   g_telem_delay_req_ms = 0;
                   g_telem_delay_actual_ms = 0;
+                  g_telem_poll_calls = 0;
+                  g_telem_scumm_loops = 0;
+                  g_telem_scumm_delta = 0;
+                  g_telem_wt_calls = 0;
+                  g_telem_wt_qf = 0;
+                  g_telem_wt_req_us = 0;
+                  g_telem_wt_wait_us = 0;
               }
           }
 
@@ -543,9 +660,9 @@ jobs:
 
           with open(core_path, "w") as f:
               f.write(ctxt)
-          print("Successfully patched libretro-core.cpp with LeapsterGS touchscreen + telemetry + 100% speed lock!")
+          print("Successfully patched libretro-core.cpp with LeapsterGS touchscreen + V4 telemetry + waitForTimer lock!")
 
-          # 11. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
+          # 12. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
@@ -659,11 +776,11 @@ jobs:
           '
           ls -lh scummvm_libretro.so build_scummvm.log build_report.txt
 
-      - name: Upload ScummVM Libretro Core V3 + Datafiles + Build Log
+      - name: Upload ScummVM Libretro Core V4 + Datafiles + Build Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v3
+          name: scummvm_libretro_leapster_v4
           path: |
             scummvm_libretro.so
             scummvm.zip
