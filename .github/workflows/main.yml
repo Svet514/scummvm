@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V10 (Audio-Synced Clock + No Black Screen)
+name: Build ScummVM Libretro Core V11 (Pure Clock + No Underrun Skip + No Black Screen)
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
               with open(ms_cfg, "w") as f:
                   f.write(mtxt)
 
-          # 2. GENERIC DETECTION UNLOCK + REMOVE "NOT YET FULLY SUPPORTED" WARNING DIALOG
+          # 2. GENERIC DETECTION UNLOCK + AUTO-BYPASS UNSUPPORTED WARNING DIALOG
           adv_cpp = "engines/advancedDetector.cpp"
           with open(adv_cpp, "r", errors="ignore") as f:
               atxt = f.read()
@@ -158,10 +158,23 @@ jobs:
                           with open(fpath, "w") as f:
                               f.write(new_stxt)
 
-          # 6. Patch OSystem_libretro::getMillis, delayMillis, and updateScreen
-          #    Work-aware delayMillis: subtracts CPU render time already spent since the end of the
-          #    previous delayMillis call so heavy 640x480 frames don't double-sleep, while idle loops
-          #    wait the full requested delay instead of spinning 11,800 times/sec!
+          # Ensure LibretroTimerManager always uses a 16ms (60Hz) coroutine switch interval
+          timer_cpp = "backends/platform/libretro/src/libretro-timer.cpp"
+          if os.path.exists(timer_cpp):
+              with open(timer_cpp, "r", errors="ignore") as f:
+                  ttxt = f.read()
+              if "_interval" in ttxt:
+                  ttxt, n_tm = re.subn(
+                      r"(LibretroTimerManager::LibretroTimerManager\s*\([^{]+\{)",
+                      r"\1\n\t_interval = 16;",
+                      ttxt,
+                      count=1
+                  )
+                  with open(timer_cpp, "w") as f:
+                      f.write(ttxt)
+                  print(f"Forced 16ms switch interval in {timer_cpp} ({n_tm})")
+
+          # 6. Patch OSystem_libretro::getMillis, delayMillis (proven V5/V7 loop), and updateScreen
           extern_decls = r"""
           extern "C" {
               unsigned int leapster_hw_get_millis(void);
@@ -202,26 +215,12 @@ jobs:
                       chk = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
                       new_fn = (
                           f"void OSystem_libretro::delayMillis(uint {p}) {{\n"
-                          f"\tstatic uint32 s_last_delay_end = 0;\n"
-                          f"\tuint32 start_time = getMillis();\n"
-                          f"\tif ({p} == 0) {{ {chk}; s_last_delay_end = getMillis(); return; }}\n"
-                          f"\tuint32 work_ms = (s_last_delay_end != 0 && start_time >= s_last_delay_end) ? (start_time - s_last_delay_end) : 0;\n"
-                          f"\tuint32 target_ms = {p};\n"
-                          f"\tif ({p} <= 20) {{\n"
-                          f"\t\ttarget_ms = (work_ms < {p}) ? ({p} - work_ms) : 0;\n"
-                          f"\t}}\n"
-                          f"\tif (target_ms == 0) {{\n"
-                          f"\t\t{chk};\n"
-                          f"\t\ts_last_delay_end = getMillis();\n"
-                          f"\t\tleapster_telem_delay({p}, s_last_delay_end - start_time);\n"
-                          f"\t\treturn;\n"
-                          f"\t}}\n"
-                          f"\tuint32 elapsed_time = 0;\n"
-                          f"\twhile (elapsed_time < target_ms) {{\n"
-                          f"\t\tif (!{chk}) leapster_sleep_us(1000);\n"
+                          f"\tuint32 start_time = getMillis(), elapsed_time = 0;\n"
+                          f"\tif ({p} == 0) {{ {chk}; return; }}\n"
+                          f"\twhile (elapsed_time < {p}) {{\n"
+                          f"\t\tif (!{chk}) leapster_sleep_us(500);\n"
                           f"\t\telapsed_time = getMillis() - start_time;\n"
                           f"\t}}\n"
-                          f"\ts_last_delay_end = getMillis();\n"
                           f"\tleapster_telem_delay({p}, elapsed_time);\n}}"
                       )
                       txt = txt[:s_idx] + new_fn + txt[e_idx:]
@@ -231,13 +230,20 @@ jobs:
                           f.write(extern_decls + "\n" + txt)
 
           # 7. Patch libretro-core.cpp:
-          #    - Audio-synced virtual clock in leapster_hw_get_millis() so getMillis() NEVER outruns
-          #      the audio mixer during narrator speeches (eliminates cut-off final words!)
-          #    - In-place g_silence_pcm substitution when upstream passes data == NULL to audio_batch_cb
-          #    - Cached 320x240 frame repeat when data == NULL in leapster_video_cb (eliminates black screens!)
+          #    - Disable AUDIO_STATUS_BUFFER_UNDERRUN frameskip spiral (eliminates 21 FPS / 2048-sample clipping!)
+          #    - Pure CLOCK_MONOTONIC getMillis() (zero deadlock risk)
+          #    - Cached 320x240 frame resend when data == NULL (eliminates black screens during dialogue!)
+          #    - Silence keep-alive ONLY when g_frame_audio_sent == 0
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
+
+          ctxt, n_und = re.subn(
+              r"audio_status\s*\|=\s*AUDIO_STATUS_BUFFER_UNDERRUN\s*;",
+              "audio_status &= ~AUDIO_STATUS_BUFFER_UNDERRUN;",
+              ctxt
+          )
+          print(f"Disabled AUDIO_STATUS_BUFFER_UNDERRUN frameskip spiral in libretro-core.cpp ({n_und})")
 
           leapster_core_hook = r"""
           #include <fcntl.h>
@@ -263,49 +269,27 @@ jobs:
           static int g_ts_click_state = 0, g_ts_last_sx = 160, g_ts_last_sy = 120;
 
           static FILE *g_telem_fp = NULL;
-          static uint64_t g_telem_window_start_us = 0;
-          static uint32_t g_telem_window_start_scumm_ms = 0;
+          static uint64_t g_telem_start_us = 0, g_telem_window_start_us = 0, g_leapster_next_frame_us = 0;
           static uint32_t g_telem_retro_runs = 0, g_telem_update_screens = 0;
           static uint32_t g_telem_delay_calls = 0, g_telem_delay_req_ms = 0, g_telem_delay_actual_ms = 0;
-          static uint32_t g_telem_audio_frames = 0, g_telem_silence_fills = 0, g_telem_sec_counter = 0;
+          static uint32_t g_telem_audio_frames = 0, g_telem_max_batch = 0, g_telem_silence_fills = 0, g_telem_sec_counter = 0;
+          static uint32_t g_frame_audio_sent = 0;
           static unsigned g_last_vid_w = 0, g_last_vid_h = 0;
           static uint32_t g_down32_buf[320 * 240];
           static uint16_t g_down16_buf[320 * 240];
-          static int g_last_down_bpp = 0; // 0: none, 2: 16bpp, 4: 32bpp
-          static const int16_t g_silence_pcm[2048 * 2] = {0};
-
-          // Hybrid Audio-Synced Clock state
-          static uint64_t g_clock_base_us = 0;
-          static uint64_t g_frame_start_wall_us = 0;
-          static uint32_t g_ last_returned_ms = 0;
-          static bool g_audio_active_last_frame = false;
+          static int g_last_down_bpp = 0;
+          static const int16_t g_silence_pcm[735 * 2] = {0};
 
           static uint64_t leapster_monotonic_us(void) {
               struct timespec ts;
               clock_gettime(CLOCK_MONOTONIC, &ts);
               return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
           }
-
           extern "C" unsigned int leapster_hw_get_millis(void) {
               uint64_t now_us = leapster_monotonic_us();
-              if (g_frame_start_wall_us == 0) {
-                  g_frame_start_wall_us = now_us;
-              }
-              uint64_t intra_us = (now_us >= g_frame_start_wall_us) ? (now_us - g_frame_start_wall_us) : 0;
-              // Cap intra-frame wall progression during active audio so disk loads or heavy 640x480
-              // frames never advance getMillis() faster than the audio mixer can drain!
-              if (g_audio_active_last_frame && intra_us > 25000ULL) {
-                  intra_us = 25000ULL;
-              }
-              uint32_t ms = (uint32_t)((g_clock_base_us + intra_us) / 1000ULL);
-              if (ms < g_last_returned_ms) {
-                  ms = g_last_returned_ms;
-              } else {
-                  g_last_returned_ms = ms;
-              }
-              return ms;
+              if (g_telem_start_us == 0) g_telem_start_us = now_us;
+              return (unsigned int)((now_us - g_telem_start_us) / 1000ULL);
           }
-
           extern "C" void leapster_sleep_us(unsigned int us) { usleep((useconds_t)us); }
           extern "C" void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms) {
               g_telem_delay_calls++; g_telem_delay_req_ms += req_ms; g_telem_delay_actual_ms += actual_ms;
@@ -313,29 +297,13 @@ jobs:
           extern "C" void leapster_telem_update_screen(void) { g_telem_update_screens++; }
 
           static size_t leapster_audio_batch_cb(const int16_t *data, size_t frames) {
-              uint64_t now_us = leapster_monotonic_us();
               if (data != NULL && frames > 0) {
+                  g_frame_audio_sent += (uint32_t)frames;
                   g_telem_audio_frames += (uint32_t)frames;
-                  // Advance base clock by the exact audio duration mixed ((frames * 1000000) / 44100)
-                  uint64_t audio_us = ((uint64_t)frames * 1000000ULL) / 44100ULL;
-                  g_clock_base_us += audio_us;
-                  g_frame_start_wall_us = now_us;
-                  g_audio_active_last_frame = true;
+                  if ((uint32_t)frames > g_telem_max_batch) g_telem_max_batch = (uint32_t)frames;
                   return g_leapster_orig_audio_batch_cb ? g_leapster_orig_audio_batch_cb(data, frames) : frames;
-              } else {
-                  // Upstream libretro-core.cpp passed data == NULL (AUDIO_STATUS_MUTE).
-                  // Advance clock by wall delta and pass zeroed silence so ALSA lfp100 never shuts down.
-                  if (g_frame_start_wall_us != 0 && now_us > g_frame_start_wall_us) {
-                      uint64_t wall_dt = now_us - g_frame_start_wall_us;
-                      if (wall_dt > 50000ULL) wall_dt = 50000ULL;
-                      g_clock_base_us += wall_dt;
-                  }
-                  g_frame_start_wall_us = now_us;
-                  g_audio_active_last_frame = false;
-                  g_telem_silence_fills++;
-                  size_t sil_frames = (frames > 0 && frames <= 2048) ? frames : 735;
-                  return g_leapster_orig_audio_batch_cb ? g_leapster_orig_audio_batch_cb(g_silence_pcm, sil_frames) : frames;
               }
+              return 0;
           }
 
           static void leapster_video_cb(const void *data, unsigned width, unsigned height, size_t pitch) {
@@ -372,8 +340,7 @@ jobs:
                           return;
                       }
                   } else {
-                      // data == NULL (duplicate frame when u_scr == 0 while characters talk):
-                      // Resend cached 320x240 buffer so RetroArch never blanks the screen to black!
+                      // Static frame (u_scr == 0): resend cached 320x240 buffer so screen never blanks to black
                       if (g_last_down_bpp == 4) {
                           g_leapster_orig_video_cb(g_down32_buf, 320, 240, 320 * 4);
                           return;
@@ -468,43 +435,58 @@ jobs:
           }
 
           static void leapster_pre_frame(void) {
+              g_frame_audio_sent = 0;
               leapster_poll_touch_frame();
+              const uint64_t frame_budget_us = 16666ULL;
+              uint64_t now_us = leapster_monotonic_us();
+              if (g_leapster_next_frame_us == 0) {
+                  g_leapster_next_frame_us = now_us + frame_budget_us;
+              } else {
+                  if (now_us < g_leapster_next_frame_us) {
+                      usleep((useconds_t)(g_leapster_next_frame_us - now_us));
+                      now_us = leapster_monotonic_us();
+                  }
+                  g_leapster_next_frame_us += frame_budget_us;
+                  if (now_us > g_leapster_next_frame_us + frame_budget_us) {
+                      g_leapster_next_frame_us = now_us + frame_budget_us;
+                  }
+              }
           }
 
           static void leapster_post_frame(void) {
+              if (g_frame_audio_sent == 0 && g_leapster_orig_audio_batch_cb) {
+                  g_leapster_orig_audio_batch_cb(g_silence_pcm, 735);
+                  g_telem_silence_fills++;
+              }
               uint64_t now_us = leapster_monotonic_us();
               if (!g_telem_fp) {
                   g_telem_fp = fopen("/roms/scummvm_telemetry.log", "w");
                   if (!g_telem_fp) g_telem_fp = fopen("/tmp/scummvm_telemetry.log", "w");
                   if (g_telem_fp) {
-                      fprintf(g_telem_fp, "=== ScummVM LeapsterGS V10 Telemetry Log ===\n");
+                      fprintf(g_telem_fp, "=== ScummVM LeapsterGS V11 Telemetry Log ===\n");
                       fprintf(g_telem_fp, "Touchscreen: %s | pointercal=%d\n", g_ts_dev_name, g_use_pcal);
-                      fprintf(g_telem_fp, "sec | wall_ms | scumm_ms | r_fps | u_scr | aud_ms | sil_f | res     | d_call | d_req | d_wait | touch\n");
+                      fprintf(g_telem_fp, "sec | wall_ms | r_fps | u_scr | aud_ms | max_b | sil_f | res     | d_call | d_req | d_wait | touch\n");
                       fflush(g_telem_fp);
                   }
                   g_telem_window_start_us = now_us;
-                  g_telem_window_start_scumm_ms = leapster_hw_get_millis();
               }
               g_telem_retro_runs++;
               if (now_us - g_telem_window_start_us >= 1000000ULL) {
                   g_telem_sec_counter++;
                   uint32_t wall_ms = (uint32_t)((now_us - g_telem_window_start_us) / 1000ULL);
-                  uint32_t cur_scumm_ms = leapster_hw_get_millis();
-                  uint32_t scumm_dt_ms = cur_scumm_ms - g_telem_window_start_scumm_ms;
                   uint32_t aud_ms = (g_telem_audio_frames * 1000U) / 44100U;
                   if (g_telem_fp && g_telem_sec_counter <= 600) {
-                      fprintf(g_telem_fp, "%3u | %7u | %8u | %5u | %5u | %6u | %5u | %3ux%-3u | %6u | %5u | %6u | (%d,%d,%d)\n",
-                              g_telem_sec_counter, wall_ms, scumm_dt_ms, g_telem_retro_runs, g_telem_update_screens,
-                              aud_ms, g_telem_silence_fills, g_last_vid_w, g_last_vid_h,
+                      fprintf(g_telem_fp, "%3u | %7u | %5u | %5u | %6u | %5u | %5u | %3ux%-3u | %6u | %5u | %6u | (%d,%d,%d)\n",
+                              g_telem_sec_counter, wall_ms, g_telem_retro_runs, g_telem_update_screens,
+                              aud_ms, g_telem_max_batch, g_telem_silence_fills, g_last_vid_w, g_last_vid_h,
                               g_telem_delay_calls, g_telem_delay_req_ms, g_telem_delay_actual_ms,
                               g_ts_last_sx, g_ts_last_sy, (int)g_ts_retro_press);
                       fflush(g_telem_fp);
                   }
                   g_telem_window_start_us = now_us;
-                  g_telem_window_start_scumm_ms = cur_scumm_ms;
                   g_telem_retro_runs = 0; g_telem_update_screens = 0;
                   g_telem_delay_calls = 0; g_telem_delay_req_ms = 0; g_telem_delay_actual_ms = 0;
-                  g_telem_audio_frames = 0; g_telem_silence_fills = 0;
+                  g_telem_audio_frames = 0; g_telem_max_batch = 0; g_telem_silence_fills = 0;
               }
           }
 
@@ -517,7 +499,6 @@ jobs:
               return g_leapster_orig_input_cb ? g_leapster_orig_input_cb(port, device, index, id) : 0;
           }
           """
-          leapster_core_hook = leapster_core_hook.replace("g_ last_returned_ms", "g_last_returned_ms")
 
           m_in = re.search(r"void\s+retro_set_input_state\s*\(\s*retro_input_state_t\s+\w+\s*\)\s*\{", ctxt)
           m_aud = re.search(r"void\s+retro_set_audio_sample_batch\s*\(\s*retro_audio_sample_batch_t\s+\w+\s*\)\s*\{", ctxt)
@@ -588,11 +569,11 @@ jobs:
             if [ -f scummvm_libretro.info ]; then cp scummvm_libretro.info /work/scummvm_libretro.info; fi
           '
 
-      - name: Upload ScummVM Libretro Core V10
+      - name: Upload ScummVM Libretro Core V11
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v10
+          name: scummvm_libretro_leapster_v11
           path: |
             scummvm_libretro.so
             scummvm.zip
