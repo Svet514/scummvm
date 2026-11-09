@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V6 (SCUMM + HE + MediaStation LionKing Fix)
+name: Build ScummVM Libretro Core V7 (Generic Any-Variant Unlock + Smooth 60Hz)
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable ONLY scumm, scumm_7_8, he, and mediastation
+          # 1. Enable scumm, scumm_7_8, he, and mediastation
           lite_content = "scumm\nscumm_7_8\nhe\nmediastation\n"
           for name in ["lite_engines.list", "engines.lite"]:
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
@@ -33,24 +33,46 @@ jobs:
               with open(ms_cfg, "w") as f:
                   f.write(mtxt)
 
-          # 1B. Patch engines/mediastation/detection_tables.h with your exact Lion King CD MD5s & sizes
-          ms_det = "engines/mediastation/detection_tables.h"
-          if os.path.exists(ms_det):
-              with open(ms_det, "r", errors="ignore") as f:
-                  dtxt = f.read()
-              lk_files = {
-                  "100.CXT": ("069b86f0912627bc1fffb1dae9b68afa", "1455740"),
-                  "BOOT.STM": ("72e9211eb97b968e8db20c0fec919eb4", "23610"),
-                  "LIONKING.EXE": ("9cc25600be13c402f4edf15772909393", "358368"),
-              }
-              for fname, (md5, size) in lk_files.items():
-                  pat = rf'("{re.escape(fname)}"\s*(?:,\s*0\s*)?,\s*")[0-9a-fA-F]+("\s*,\s*)(?:-1|\d+|AD_NO_SIZE)'
-                  dtxt, n = re.subn(pat, rf'\g<1>{md5}\g<2>{size}', dtxt, flags=re.I)
-                  print(f"Patched {fname} in {ms_det}: {n} entries updated")
-              with open(ms_det, "w") as f:
-                  f.write(dtxt)
+          # 2. GENERIC GAME DETECTION PATCH (engines/advancedDetector.cpp & gui/launcher.cpp)
+          #    Allows any game whose filenames match a supported game/fallback to launch & add
+          #    without failing on unknown MD5 variants or modified/compressed data files.
+          adv_cpp = "engines/advancedDetector.cpp"
+          with open(adv_cpp, "r", errors="ignore") as f:
+              atxt = f.read()
 
-          # 2. Stub out unused backend modules & remove imgui
+          # Clear hasUnknownFiles on all matched games before detectGame() returns
+          atxt, n_ret = re.subn(
+              r"\breturn\s+matched\s*;",
+              "{ for (uint _i = 0; _i < matched.size(); ++_i) matched[_i].hasUnknownFiles = false; return matched; }",
+              atxt
+          )
+          # Also force hasUnknownFiles = false when converting ADDetectedGame -> DetectedGame
+          atxt, n_dg = re.subn(
+              r"(\bhasUnknownFiles\s*=\s*)adGame\.hasUnknownFiles\b",
+              r"\1false",
+              atxt
+          )
+          # Disable piracy filter rejection if present
+          atxt = re.sub(
+              r"(bool\s+cleanupPirated\s*\([^)]*\)\s*\{)",
+              r"\1 return false;",
+              atxt
+          )
+          with open(adv_cpp, "w") as f:
+              f.write(atxt)
+          print(f"Generic detector unlock applied to {adv_cpp} (return hooks={n_ret}, dg hooks={n_dg})")
+
+          # Also ensure gui/launcher.cpp never blocks adding a game due to hasUnknownFiles
+          launcher_cpp = "gui/launcher.cpp"
+          if os.path.exists(launcher_cpp):
+              with open(launcher_cpp, "r", errors="ignore") as f:
+                  ltxt = f.read()
+              ltxt, n_l = re.subn(r"\b(\w+(?:\[\w+\])?)\.hasUnknownFiles\b", "false", ltxt)
+              with open(launcher_cpp, "w") as f:
+                  f.write(ltxt)
+              print(f"Patched gui/launcher.cpp unknown-variant checks ({n_l})")
+
+          # 3. Stub out unused backend modules & remove imgui
           for mod_mk in [
               "backends/imgui/module.mk",
               "backends/networking/basic/module.mk",
@@ -70,7 +92,7 @@ jobs:
               with open("configure", "w") as f:
                   f.write(cfg)
 
-          # 3. Disable external libraries while keeping HIGH_DEF := 1
+          # 4. Disable external libraries while keeping HIGH_DEF := 1 (32-bit color)
           disable_vars = [
               "USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
               "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH",
@@ -118,7 +140,7 @@ jobs:
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
 
-          # 4. Force RETRO_DEVICE_POINTER and disable timing_inaccuracies
+          # 5. Force RETRO_DEVICE_POINTER and disable timing_inaccuracies
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if fn.endswith((".cpp", ".h")):
@@ -135,7 +157,7 @@ jobs:
                           with open(fpath, "w") as f:
                               f.write(new_stxt)
 
-          # 5. Patch OSystem_libretro::getMillis and delayMillis (V5 100% speed & smooth audio)
+          # 6. Patch OSystem_libretro::getMillis and delayMillis (V5 100% speed & smooth audio)
           extern_decls = r"""
           extern "C" {
               unsigned int leapster_hw_get_millis(void);
@@ -182,7 +204,7 @@ jobs:
                       with open(fpath, "w") as f:
                           f.write(extern_decls + "\n" + txt)
 
-          # 6. Patch libretro-core.cpp with LeapsterGS touchscreen + 60Hz frame limiter
+          # 7. Patch libretro-core.cpp with LeapsterGS touchscreen + 60Hz frame limiter
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
@@ -339,7 +361,7 @@ jobs:
           with open(core_path, "w") as f:
               f.write(ctxt)
 
-          # 7. Inject Cortex-A9 compiler flags into Makefile
+          # 8. Inject Cortex-A9 compiler flags into Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
@@ -375,11 +397,11 @@ jobs:
             if [ -f scummvm_libretro.info ]; then cp scummvm_libretro.info /work/scummvm_libretro.info; fi
           '
 
-      - name: Upload ScummVM Libretro Core V6
+      - name: Upload ScummVM Libretro Core V7
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v6
+          name: scummvm_libretro_leapster_v7
           path: |
             scummvm_libretro.so
             scummvm.zip
