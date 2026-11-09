@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V5 (SCUMM + HE + MediaStation + Smooth 60Hz Audio/Speed)
+name: Build ScummVM Libretro Core V6 (SCUMM + HE + MediaStation LionKing Fix)
 
 on:
   push:
@@ -10,24 +10,21 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      - name: Clone & Patch ScummVM v2026.4.0 (SCUMM + MediaStation + Touch + V5 Timing)
+      - name: Clone & Patch ScummVM v2026.4.0
         run: |
           rm -rf scummvm-2026.4.0
           git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
           cd scummvm-2026.4.0
 
           python3 - << 'EOF'
-          import os
-          import re
+          import os, re
 
-          # 1. Write scumm (+ scumm_7_8, he) AND mediastation to lite_engines.list and engines.lite
+          # 1. Enable ONLY scumm, scumm_7_8, he, and mediastation
           lite_content = "scumm\nscumm_7_8\nhe\nmediastation\n"
-          for list_name in ["lite_engines.list", "engines.lite"]:
-              p = os.path.join("backends/platform/libretro", list_name)
-              with open(p, "w") as f:
+          for name in ["lite_engines.list", "engines.lite"]:
+              with open(os.path.join("backends/platform/libretro", name), "w") as f:
                   f.write(lite_content)
 
-          # Ensure engines/mediastation/configure.engine is enabled by default (not skipped as WIP)
           ms_cfg = "engines/mediastation/configure.engine"
           if os.path.exists(ms_cfg):
               with open(ms_cfg, "r") as f:
@@ -35,11 +32,25 @@ jobs:
               mtxt = re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt)
               with open(ms_cfg, "w") as f:
                   f.write(mtxt)
-              print("Enabled MediaStation engine in engines/mediastation/configure.engine!")
-          else:
-              print("WARNING: engines/mediastation/configure.engine not found!")
 
-          # 2. Stub out imgui, networking, and cloud module.mk files
+          # 1B. Patch engines/mediastation/detection_tables.h with your exact Lion King CD MD5s & sizes
+          ms_det = "engines/mediastation/detection_tables.h"
+          if os.path.exists(ms_det):
+              with open(ms_det, "r", errors="ignore") as f:
+                  dtxt = f.read()
+              lk_files = {
+                  "100.CXT": ("069b86f0912627bc1fffb1dae9b68afa", "1455740"),
+                  "BOOT.STM": ("72e9211eb97b968e8db20c0fec919eb4", "23610"),
+                  "LIONKING.EXE": ("9cc25600be13c402f4edf15772909393", "358368"),
+              }
+              for fname, (md5, size) in lk_files.items():
+                  pat = rf'("{re.escape(fname)}"\s*(?:,\s*0\s*)?,\s*")[0-9a-fA-F]+("\s*,\s*)(?:-1|\d+|AD_NO_SIZE)'
+                  dtxt, n = re.subn(pat, rf'\g<1>{md5}\g<2>{size}', dtxt, flags=re.I)
+                  print(f"Patched {fname} in {ms_det}: {n} entries updated")
+              with open(ms_det, "w") as f:
+                  f.write(dtxt)
+
+          # 2. Stub out unused backend modules & remove imgui
           for mod_mk in [
               "backends/imgui/module.mk",
               "backends/networking/basic/module.mk",
@@ -50,9 +61,8 @@ jobs:
           ]:
               if os.path.exists(mod_mk):
                   with open(mod_mk, "w") as f:
-                      f.write("# Disabled for Leapster build\n")
+                      f.write("# Disabled\n")
 
-          # 3. Remove imgui from root configure script
           if os.path.exists("configure"):
               with open("configure", "r", errors="ignore") as f:
                   cfg = f.read()
@@ -60,7 +70,7 @@ jobs:
               with open("configure", "w") as f:
                   f.write(cfg)
 
-          # 4. Force unwanted external libraries off (:= 0) while keeping HIGH_DEF := 1 (32-bit color)
+          # 3. Disable external libraries while keeping HIGH_DEF := 1
           disable_vars = [
               "USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET",
               "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH",
@@ -70,7 +80,6 @@ jobs:
               "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY",
               "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"
           ]
-
           for mk_rel in [
               "backends/platform/libretro/Makefile",
               "backends/platform/libretro/Makefile.common",
@@ -85,11 +94,9 @@ jobs:
                   with open(mk_rel, "w") as f:
                       f.write(txt)
 
-          # 5. Convert `ifdef USE_<VAR>` -> `ifeq ($(USE_<VAR>), 1)` in all .mk files and Makefiles
-          var_pattern = "|".join(disable_vars)
-          ifdef_re = re.compile(rf"^(\s*)ifdef\s+({var_pattern})\s*$", flags=re.M)
-          ifndef_re = re.compile(rf"^(\s*)ifndef\s+({var_pattern})\s*$", flags=re.M)
-
+          var_pat = "|".join(disable_vars)
+          ifdef_re = re.compile(rf"^(\s*)ifdef\s+({var_pat})\s*$", flags=re.M)
+          ifndef_re = re.compile(rf"^(\s*)ifndef\s+({var_pat})\s*$", flags=re.M)
           for root, _, files in os.walk("."):
               for fn in files:
                   if fn.endswith(".mk") or fn in ("Makefile", "Makefile.common"):
@@ -102,19 +109,16 @@ jobs:
                           with open(fpath, "w") as f:
                               f.write(new_mtxt)
 
-          # 6. Patch scripts/configure_engines.sh
           cfg_sh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(cfg_sh):
               with open(cfg_sh, "r") as f:
                   sh_txt = f.read()
-              sh_txt = sh_txt.replace("--enable-libcurl", "--disable-libcurl")
-              sh_txt = sh_txt.replace("--enable-cloud", "--disable-cloud")
-              sh_txt = sh_txt.replace("--enable-basic-net", "--disable-basic-net")
-              sh_txt = sh_txt.replace("--enable-alsa", "--disable-alsa")
+              for flag in ["libcurl", "cloud", "basic-net", "alsa"]:
+                  sh_txt = sh_txt.replace(f"--enable-{flag}", f"--disable-{flag}")
               with open(cfg_sh, "w") as f:
                   f.write(sh_txt)
 
-          # 7. Force RETRO_DEVICE_POINTER and disable timing_inaccuracies across backends/platform/libretro/src/*
+          # 4. Force RETRO_DEVICE_POINTER and disable timing_inaccuracies
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if fn.endswith((".cpp", ".h")):
@@ -123,67 +127,21 @@ jobs:
                           stxt = f.read()
                       new_stxt = re.sub(
                           r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)",
-                          r"\1\n\treturn RETRO_DEVICE_POINTER;",
-                          stxt
-                      )
+                          r"\1\n\treturn RETRO_DEVICE_POINTER;", stxt)
                       new_stxt = re.sub(
                           r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)",
-                          r"\1\n\treturn false;",
-                          new_stxt
-                      )
+                          r"\1\n\treturn false;", new_stxt)
                       if new_stxt != stxt:
                           with open(fpath, "w") as f:
                               f.write(new_stxt)
-                          print(f"Patched settings in {fpath}!")
 
-          # 8. Telemetry-only hook on ScummEngine::scummLoop and ScummEngine::waitForTimer (NO blocking usleep!)
-          scumm_path = "engines/scumm/scumm.cpp"
-          if os.path.exists(scumm_path):
-              with open(scumm_path, "r", errors="ignore") as f:
-                  scumm_txt = f.read()
-              scumm_externs = r"""
-          extern "C" {
-              void leapster_telem_scumm_loop(int delta);
-              void leapster_telem_wait_timer(int quarterFrames);
-          }
-          """
-              scumm_txt, n_sl = re.subn(
-                  r"(void\s+ScummEngine::scummLoop\s*\(\s*int\s+(\w+)\s*\)\s*\{)",
-                  r"\1\n\tleapster_telem_scumm_loop(\2);",
-                  scumm_txt,
-                  count=1
-              )
-              scumm_txt, n_wt = re.subn(
-                  r"(void\s+ScummEngine::waitForTimer\s*\(\s*int\s+(\w+)[^)]*\)\s*\{)",
-                  r"\1\n\tleapster_telem_wait_timer(\2);",
-                  scumm_txt,
-                  count=1
-              )
-              scumm_txt = scumm_externs + "\n" + scumm_txt
-              with open(scumm_path, "w") as f:
-                  f.write(scumm_txt)
-              print(f"Added non-blocking telemetry counters to ScummEngine::scummLoop ({n_sl}) and waitForTimer ({n_wt})!")
-
-          # 9. Patch OSystem_libretro::getMillis, delayMillis, pollEvent, and updateScreen
-          #    CRITICAL FIX: In delayMillis(msecs), ALWAYS yield to the main RetroArch thread via
-          #    switchThread(THREAD_SWITCH_DELAY) when checkThread() doesn't switch, or sleep only 500us
-          #    so retro_run() runs at a full 60 FPS (keeping audio 100% smooth) while waiting the exact msecs!
+          # 5. Patch OSystem_libretro::getMillis and delayMillis (V5 100% speed & smooth audio)
           extern_decls = r"""
           extern "C" {
               unsigned int leapster_hw_get_millis(void);
-              void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms);
-              void leapster_telem_delay0(void);
-              void leapster_telem_poll(void);
-              void leapster_telem_update_screen(void);
               void leapster_sleep_us(unsigned int us);
           }
           """
-
-          patched_getmillis = 0
-          patched_delaymillis = 0
-          patched_updatescreen = 0
-          patched_pollevent = 0
-
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
                   if not fn.endswith(".cpp"):
@@ -191,94 +149,40 @@ jobs:
                   fpath = os.path.join(root, fn)
                   with open(fpath, "r", errors="ignore") as f:
                       txt = f.read()
-
-                  modified = False
-
+                  mod = False
                   if "OSystem_libretro::getMillis" in txt:
                       txt, n = re.subn(
                           r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)",
-                          r"\1\n\treturn (uint32)leapster_hw_get_millis();",
-                          txt,
-                          count=1
-                      )
-                      if n > 0:
-                          patched_getmillis += n
-                          modified = True
-
-                  if "OSystem_libretro::pollEvent" in txt:
-                      txt, n = re.subn(
-                          r"(bool\s+OSystem_libretro::pollEvent\s*\([^)]*\)\s*\{)",
-                          r"\1\n\tleapster_telem_poll();",
-                          txt,
-                          count=1
-                      )
-                      if n > 0:
-                          patched_pollevent += n
-                          modified = True
-
+                          r"\1\n\treturn (uint32)leapster_hw_get_millis();", txt, count=1)
+                      mod = mod or (n > 0)
                   m_delay = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", txt)
                   if m_delay:
-                      param_name = m_delay.group(1)
-                      start_idx = m_delay.start()
-                      brace_idx = m_delay.end() - 1
-                      depth = 0
-                      end_idx = -1
-                      for idx in range(brace_idx, len(txt)):
-                          if txt[idx] == "{":
-                              depth += 1
+                      p = m_delay.group(1)
+                      s_idx, b_idx = m_delay.start(), m_delay.end() - 1
+                      depth, e_idx = 0, -1
+                      for idx in range(b_idx, len(txt)):
+                          if txt[idx] == "{": depth += 1
                           elif txt[idx] == "}":
                               depth -= 1
-                              if depth == 0:
-                                  end_idx = idx + 1
-                                  break
-                      assert end_idx != -1, "Could not find closing brace of delayMillis"
-                      orig_delay_body = txt[brace_idx:end_idx]
-                      m_chk = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", orig_delay_body)
-                      chk_call = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
-
-                      new_delay_fn = (
-                          f"void OSystem_libretro::delayMillis(uint {param_name}) {{\n"
-                          f"\tuint32 start_time = getMillis();\n"
-                          f"\tuint32 elapsed_time = 0;\n"
-                          f"\tif ({param_name} == 0) {{\n"
-                          f"\t\tleapster_telem_delay0();\n"
-                          f"\t\t{chk_call};\n"
-                          f"\t\treturn;\n"
-                          f"\t}}\n"
-                          f"\twhile (elapsed_time < {param_name}) {{\n"
-                          f"\t\tif (!{chk_call})\n"
-                          f"\t\t\tleapster_sleep_us(500);\n"
+                              if depth == 0: e_idx = idx + 1; break
+                      m_chk = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", txt[b_idx:e_idx])
+                      chk = m_chk.group(0) if m_chk else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
+                      new_fn = (
+                          f"void OSystem_libretro::delayMillis(uint {p}) {{\n"
+                          f"\tuint32 start_time = getMillis(), elapsed_time = 0;\n"
+                          f"\tif ({p} == 0) {{ {chk}; return; }}\n"
+                          f"\twhile (elapsed_time < {p}) {{\n"
+                          f"\t\tif (!{chk}) leapster_sleep_us(500);\n"
                           f"\t\telapsed_time = getMillis() - start_time;\n"
-                          f"\t}}\n"
-                          f"\tleapster_telem_delay({param_name}, elapsed_time);\n"
-                          f"}}"
+                          f"\t}}\n}}"
                       )
-                      txt = txt[:start_idx] + new_delay_fn + txt[end_idx:]
-                      patched_delaymillis += 1
-                      modified = True
-
-                  if "::updateScreen" in txt:
-                      txt, n = re.subn(
-                          r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)",
-                          r"\1\n\tleapster_telem_update_screen();",
-                          txt,
-                          count=1
-                      )
-                      if n > 0:
-                          patched_updatescreen += n
-                          modified = True
-
-                  if modified:
-                      txt = extern_decls + "\n" + txt
+                      txt = txt[:s_idx] + new_fn + txt[e_idx:]
+                      mod = True
+                  if mod:
                       with open(fpath, "w") as f:
-                          f.write(txt)
-                      print(f"Patched timing/telemetry hooks in {fpath}!")
+                          f.write(extern_decls + "\n" + txt)
 
-          assert patched_getmillis >= 1, "Failed to patch OSystem_libretro::getMillis!"
-          assert patched_delaymillis >= 1, "Failed to patch OSystem_libretro::delayMillis!"
-          print(f"Summary: getMillis={patched_getmillis}, delayMillis={patched_delaymillis}, pollEvent={patched_pollevent}, updateScreen={patched_updatescreen}")
-
-          # 10. Patch backends/platform/libretro/src/libretro-core.cpp
+          # 6. Patch libretro-core.cpp with LeapsterGS touchscreen + 60Hz frame limiter
           core_path = "backends/platform/libretro/src/libretro-core.cpp"
           with open(core_path, "r") as f:
               ctxt = f.read()
@@ -295,144 +199,62 @@ jobs:
 
           static retro_input_state_t g_leapster_orig_input_cb = NULL;
           static int g_ts_fd = -2;
-          static char g_ts_dev_name[64] = "none";
-          static int g_ts_cur_x = 160, g_ts_cur_y = 120;
-          static int g_ts_raw_x = 160, g_ts_raw_y = 120, g_ts_touch = 0;
+          static int g_ts_cur_x = 160, g_ts_cur_y = 120, g_ts_raw_x = 160, g_ts_raw_y = 120, g_ts_touch = 0;
           static int g_ts_min_x = 0, g_ts_max_x = 319, g_ts_min_y = 0, g_ts_max_y = 239;
           static int g_use_pcal = 0;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ts_ever_touched = false;
-          static int16_t g_ts_retro_x = 0;
-          static int16_t g_ts_retro_y = 0;
-          static int16_t g_ts_retro_press = 0;
+          static int16_t g_ts_retro_x = 0, g_ts_retro_y = 0, g_ts_retro_press = 0;
           static int g_ts_click_state = 0;
-          static int g_ts_last_sx = 160, g_ts_last_sy = 120;
-
-          // Telemetry state
-          static FILE *g_telem_fp = NULL;
-          static uint64_t g_telem_start_us = 0;
-          static uint64_t g_telem_window_start_us = 0;
-          static uint32_t g_telem_window_start_scumm_ms = 0;
-          static uint32_t g_telem_retro_runs = 0;
-          static uint32_t g_telem_update_screens = 0;
-          static uint32_t g_telem_delay_calls = 0;
-          static uint32_t g_telem_delay0_calls = 0;
-          static uint32_t g_telem_delay_req_ms = 0;
-          static uint32_t g_telem_delay_actual_ms = 0;
-          static uint32_t g_telem_poll_calls = 0;
-          static uint32_t g_telem_scumm_loops = 0;
-          static uint32_t g_telem_wt_calls = 0;
-          static uint32_t g_telem_wt_qf = 0;
-          static uint32_t g_telem_sec_counter = 0;
+          static uint64_t g_telem_start_us = 0, g_leapster_last_frame_us = 0;
 
           static uint64_t leapster_monotonic_us(void) {
               struct timespec ts;
               clock_gettime(CLOCK_MONOTONIC, &ts);
               return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL);
           }
-
           extern "C" unsigned int leapster_hw_get_millis(void) {
               uint64_t now_us = leapster_monotonic_us();
               if (g_telem_start_us == 0) g_telem_start_us = now_us;
               return (unsigned int)((now_us - g_telem_start_us) / 1000ULL);
           }
-
-          extern "C" void leapster_sleep_us(unsigned int us) {
-              usleep((useconds_t)us);
-          }
-
-          extern "C" void leapster_telem_delay(unsigned int req_ms, unsigned int actual_ms) {
-              g_telem_delay_calls++;
-              g_telem_delay_req_ms += req_ms;
-              g_telem_delay_actual_ms += actual_ms;
-          }
-
-          extern "C" void leapster_telem_delay0(void) {
-              g_telem_delay0_calls++;
-          }
-
-          extern "C" void leapster_telem_poll(void) {
-              g_telem_poll_calls++;
-          }
-
-          extern "C" void leapster_telem_update_screen(void) {
-              g_telem_update_screens++;
-          }
-
-          extern "C" void leapster_telem_scumm_loop(int delta) {
-              (void)delta;
-              g_telem_scumm_loops++;
-          }
-
-          extern "C" void leapster_telem_wait_timer(int quarterFrames) {
-              g_telem_wt_calls++;
-              if (quarterFrames > 0) g_telem_wt_qf += (uint32_t)quarterFrames;
-          }
+          extern "C" void leapster_sleep_us(unsigned int us) { usleep((useconds_t)us); }
 
           #define LEAP_BITS_PER_LONG (sizeof(unsigned long) * 8)
           #define LEAP_NBITS(x) ((((x) - 1) / LEAP_BITS_PER_LONG) + 1)
-          #define LEAP_TEST_BIT(bit, array) ((array[(bit) / LEAP_BITS_PER_LONG] >> ((bit) % LEAP_BITS_PER_LONG)) & 1)
+          #define LEAP_TEST_BIT(b, a) ((a[(b) / LEAP_BITS_PER_LONG] >> ((b) % LEAP_BITS_PER_LONG)) & 1)
 
           static void leapster_init_touch(void) {
               if (g_ts_fd != -2) return;
               g_ts_fd = -1;
               FILE *pf = fopen("/etc/pointercal", "r");
               if (pf) {
-                  if (fscanf(pf, "%ld %ld %ld %ld %ld %ld %ld",
-                             &g_pcal[0], &g_pcal[1], &g_pcal[2],
-                             &g_pcal[3], &g_pcal[4], &g_pcal[5], &g_pcal[6]) == 7 && g_pcal[6] != 0) {
+                  if (fscanf(pf, "%ld %ld %ld %ld %ld %ld %ld", &g_pcal[0], &g_pcal[1], &g_pcal[2],
+                             &g_pcal[3], &g_pcal[4], &g_pcal[5], &g_pcal[6]) == 7 && g_pcal[6] != 0)
                       g_use_pcal = 1;
-                  }
                   fclose(pf);
               }
-              int fallback_fd = -1;
               for (int i = 0; i < 8; i++) {
-                  char devpath[32];
+                  char devpath[32], name[64] = {0};
                   snprintf(devpath, sizeof(devpath), "/dev/input/event%d", i);
                   int fd = open(devpath, O_RDONLY | O_NONBLOCK);
                   if (fd < 0) continue;
-                  char name[64] = {0};
                   ioctl(fd, EVIOCGNAME(sizeof(name) - 1), name);
-                  if (strstr(name, "aclmtr") || strstr(name, "accel") || strstr(name, "Accel")) {
-                      close(fd);
-                      continue;
-                  }
-                  unsigned long evbit[LEAP_NBITS(EV_MAX)] = {0};
-                  unsigned long absbit[LEAP_NBITS(ABS_MAX)] = {0};
-                  unsigned long keybit[LEAP_NBITS(KEY_MAX)] = {0};
-                  if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) >= 0 && LEAP_TEST_BIT(EV_ABS, evbit)) {
-                      if (ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit) >= 0 &&
-                          LEAP_TEST_BIT(ABS_X, absbit) && LEAP_TEST_BIT(ABS_Y, absbit)) {
-                          ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
-                          if (LEAP_TEST_BIT(BTN_TOUCH, keybit) || LEAP_TEST_BIT(BTN_LEFT, keybit) ||
-                              strstr(name, "ts") || strstr(name, "TS") || strstr(name, "touch") || strstr(name, "Touch")) {
-                              g_ts_fd = fd;
-                              snprintf(g_ts_dev_name, sizeof(g_ts_dev_name), "event%d:%s", i, name);
-                              break;
-                          } else if (fallback_fd < 0) {
-                              fallback_fd = fd;
-                              snprintf(g_ts_dev_name, sizeof(g_ts_dev_name), "event%d:%s", i, name);
-                              continue;
-                          }
+                  if (strstr(name, "aclmtr") || strstr(name, "accel") || strstr(name, "Accel")) { close(fd); continue; }
+                  unsigned long evbit[LEAP_NBITS(EV_MAX)] = {0}, absbit[LEAP_NBITS(ABS_MAX)] = {0}, keybit[LEAP_NBITS(KEY_MAX)] = {0};
+                  if (ioctl(fd, EVIOCGBIT(0, sizeof(evbit)), evbit) >= 0 && LEAP_TEST_BIT(EV_ABS, evbit) &&
+                      ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(absbit)), absbit) >= 0 && LEAP_TEST_BIT(ABS_X, absbit) && LEAP_TEST_BIT(ABS_Y, absbit)) {
+                      ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(keybit)), keybit);
+                      if (LEAP_TEST_BIT(BTN_TOUCH, keybit) || LEAP_TEST_BIT(BTN_LEFT, keybit) || strstr(name, "touch") || strstr(name, "ts")) {
+                          g_ts_fd = fd; break;
                       }
                   }
                   close(fd);
               }
-              if (g_ts_fd < 0 && fallback_fd >= 0) {
-                  g_ts_fd = fallback_fd;
-              } else if (fallback_fd >= 0 && fallback_fd != g_ts_fd) {
-                  close(fallback_fd);
-              }
               if (g_ts_fd >= 0) {
                   struct input_absinfo ax, ay;
-                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_X), &ax) >= 0 && ax.maximum > ax.minimum) {
-                      g_ts_min_x = ax.minimum;
-                      g_ts_max_x = ax.maximum;
-                  }
-                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_Y), &ay) >= 0 && ay.maximum > ay.minimum) {
-                      g_ts_min_y = ay.minimum;
-                      g_ts_max_y = ay.maximum;
-                  }
+                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_X), &ax) >= 0 && ax.maximum > ax.minimum) { g_ts_min_x = ax.minimum; g_ts_max_x = ax.maximum; }
+                  if (ioctl(g_ts_fd, EVIOCGABS(ABS_Y), &ay) >= 0 && ay.maximum > ay.minimum) { g_ts_min_y = ay.minimum; g_ts_max_y = ay.maximum; }
               }
           }
 
@@ -440,164 +262,69 @@ jobs:
               leapster_init_touch();
               if (g_ts_fd < 0) return;
               struct input_event ev;
-              bool saw_touch_down_this_frame = false;
+              bool down_now = false;
               while (read(g_ts_fd, &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
                   if (ev.type == EV_ABS) {
-                      if (ev.code == ABS_X) {
-                          g_ts_cur_x = ev.value;
-                      } else if (ev.code == ABS_Y) {
-                          g_ts_cur_y = ev.value;
-                      } else if (ev.code == ABS_PRESSURE) {
-                          g_ts_touch = (ev.value > 0) ? 1 : 0;
-                          if (g_ts_touch) saw_touch_down_this_frame = true;
-                      }
+                      if (ev.code == ABS_X) g_ts_cur_x = ev.value;
+                      else if (ev.code == ABS_Y) g_ts_cur_y = ev.value;
+                      else if (ev.code == ABS_PRESSURE) { g_ts_touch = (ev.value > 0) ? 1 : 0; if (g_ts_touch) down_now = true; }
                   } else if (ev.type == EV_KEY && (ev.code == BTN_TOUCH || ev.code == BTN_LEFT)) {
-                      g_ts_touch = (ev.value != 0) ? 1 : 0;
-                      if (g_ts_touch) saw_touch_down_this_frame = true;
-                  } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
-                      if (g_ts_touch) {
-                          g_ts_raw_x = g_ts_cur_x;
-                          g_ts_raw_y = g_ts_cur_y;
-                          g_ts_ever_touched = true;
-                      }
+                      g_ts_touch = (ev.value != 0) ? 1 : 0; if (g_ts_touch) down_now = true;
+                  } else if (ev.type == EV_SYN && ev.code == SYN_REPORT && g_ts_touch) {
+                      g_ts_raw_x = g_ts_cur_x; g_ts_raw_y = g_ts_cur_y; g_ts_ever_touched = true;
                   }
               }
-              if (g_ts_touch) {
-                  g_ts_raw_x = g_ts_cur_x;
-                  g_ts_raw_y = g_ts_cur_y;
-                  g_ts_ever_touched = true;
-              }
+              if (g_ts_touch) { g_ts_raw_x = g_ts_cur_x; g_ts_raw_y = g_ts_cur_y; g_ts_ever_touched = true; }
               if (!g_ts_ever_touched) return;
-
               int sx = 0, sy = 0;
               if (g_use_pcal) {
                   sx = (int)((g_pcal[0] * (long)g_ts_raw_x + g_pcal[1] * (long)g_ts_raw_y + g_pcal[2]) / g_pcal[6]);
                   sy = (int)((g_pcal[3] * (long)g_ts_raw_x + g_pcal[4] * (long)g_ts_raw_y + g_pcal[5]) / g_pcal[6]);
               } else {
-                  int rx = g_ts_max_x - g_ts_min_x;
-                  int ry = g_ts_max_y - g_ts_min_y;
+                  int rx = g_ts_max_x - g_ts_min_x, ry = g_ts_max_y - g_ts_min_y;
                   sx = (rx > 0) ? ((g_ts_raw_x - g_ts_min_x) * 320) / rx : g_ts_raw_x;
                   sy = (ry > 0) ? ((g_ts_raw_y - g_ts_min_y) * 240) / ry : g_ts_raw_y;
               }
-              if (sx < 0) sx = 0;
-              if (sx > 319) sx = 319;
-              if (sy < 0) sy = 0;
-              if (sy > 239) sy = 239;
-              g_ts_last_sx = sx;
-              g_ts_last_sy = sy;
-
+              if (sx < 0) sx = 0; else if (sx > 319) sx = 319;
+              if (sy < 0) sy = 0; else if (sy > 239) sy = 239;
               g_ts_retro_x = (int16_t)(((long)sx * 0xffffL) / 320L - 0x7fffL);
               g_ts_retro_y = (int16_t)(((long)sy * 0xffffL) / 240L - 0x7fffL);
-
               if (g_ts_click_state == 0) {
-                  if (g_ts_touch || saw_touch_down_this_frame) {
-                      g_ts_retro_press = 0;
-                      g_ts_click_state = 1;
-                  } else {
-                      g_ts_retro_press = 0;
-                  }
+                  g_ts_retro_press = 0;
+                  if (g_ts_touch || down_now) g_ts_click_state = 1;
               } else if (g_ts_click_state == 1) {
-                  g_ts_retro_press = 1;
-                  g_ts_click_state = 2;
+                  g_ts_retro_press = 1; g_ts_click_state = 2;
               } else {
-                  if (g_ts_touch) {
-                      g_ts_retro_press = 1;
-                  } else {
-                      g_ts_retro_press = 0;
-                      g_ts_click_state = 0;
-                  }
-              }
-          }
-
-          static void leapster_log_telemetry_tick(void) {
-              uint64_t now_us = leapster_monotonic_us();
-              if (!g_telem_fp) {
-                  g_telem_fp = fopen("/roms/scummvm_telemetry.log", "w");
-                  if (!g_telem_fp) g_telem_fp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_telem_fp) {
-                      fprintf(g_telem_fp, "=== ScummVM LeapsterGS V5 Telemetry Log ===\n");
-                      fprintf(g_telem_fp, "Touchscreen device: %s | pointercal=%d\n", g_ts_dev_name, g_use_pcal);
-                      fprintf(g_telem_fp, "sec | wall_ms | r_fps | u_scr | s_loop | wt_call | wt_qf | d_call | d0_call | d_req | d_wait | polls | touch\n");
-                      fflush(g_telem_fp);
-                  }
-                  g_telem_window_start_us = now_us;
-                  g_telem_window_start_scumm_ms = leapster_hw_get_millis();
-              }
-              g_telem_retro_runs++;
-              if (now_us - g_telem_window_start_us >= 1000000ULL) {
-                  g_telem_sec_counter++;
-                  uint32_t wall_dt_ms = (uint32_t)((now_us - g_telem_window_start_us) / 1000ULL);
-                  uint32_t cur_scumm_ms = leapster_hw_get_millis();
-                  if (g_telem_fp && g_telem_sec_counter <= 600) {
-                      fprintf(g_telem_fp,
-                              "%3u | %7u | %5u | %5u | %6u | %7u | %5u | %6u | %7u | %5u | %6u | %5u | (%d,%d,%d)\n",
-                              g_telem_sec_counter,
-                              wall_dt_ms,
-                              g_telem_retro_runs,
-                              g_telem_update_screens,
-                              g_telem_scumm_loops,
-                              g_telem_wt_calls,
-                              g_telem_wt_qf,
-                              g_telem_delay_calls,
-                              g_telem_delay0_calls,
-                              g_telem_delay_req_ms,
-                              g_telem_delay_actual_ms,
-                              g_telem_poll_calls,
-                              g_ts_last_sx, g_ts_last_sy, (int)g_ts_retro_press);
-                      fflush(g_telem_fp);
-                  }
-                  g_telem_window_start_us = now_us;
-                  g_telem_window_start_scumm_ms = cur_scumm_ms;
-                  g_telem_retro_runs = 0;
-                  g_telem_update_screens = 0;
-                  g_telem_delay_calls = 0;
-                  g_telem_delay0_calls = 0;
-                  g_telem_delay_req_ms = 0;
-                  g_telem_delay_actual_ms = 0;
-                  g_telem_poll_calls = 0;
-                  g_telem_scumm_loops = 0;
-                  g_telem_wt_calls = 0;
-                  g_telem_wt_qf = 0;
+                  if (g_ts_touch) g_ts_retro_press = 1;
+                  else { g_ts_retro_press = 0; g_ts_click_state = 0; }
               }
           }
 
           static int16_t leapster_input_state_cb(unsigned port, unsigned device, unsigned index, unsigned id) {
-              if ((device & 0xff) == RETRO_DEVICE_POINTER && port == 0 && index == 0) {
-                  if (g_ts_ever_touched) {
-                      if (id == RETRO_DEVICE_ID_POINTER_X) return g_ts_retro_x;
-                      if (id == RETRO_DEVICE_ID_POINTER_Y) return g_ts_retro_y;
-                      if (id == RETRO_DEVICE_ID_POINTER_PRESSED) return g_ts_retro_press;
-                  }
+              if ((device & 0xff) == RETRO_DEVICE_POINTER && port == 0 && index == 0 && g_ts_ever_touched) {
+                  if (id == RETRO_DEVICE_ID_POINTER_X) return g_ts_retro_x;
+                  if (id == RETRO_DEVICE_ID_POINTER_Y) return g_ts_retro_y;
+                  if (id == RETRO_DEVICE_ID_POINTER_PRESSED) return g_ts_retro_press;
               }
               return g_leapster_orig_input_cb ? g_leapster_orig_input_cb(port, device, index, id) : 0;
           }
-
-          static uint64_t g_leapster_last_frame_us = 0;
           """
 
           m_in = re.search(r"void\s+retro_set_input_state\s*\(\s*retro_input_state_t\s+\w+\s*\)\s*\{", ctxt)
           m_run = re.search(r"void\s+retro_run\s*\(\s*(?:void)?\s*\)\s*\{", ctxt)
-          assert m_in and m_run, "Could not locate retro_set_input_state or retro_run in libretro-core.cpp"
+          pos = min(m_in.start(), m_run.start())
+          ctxt = ctxt[:pos] + leapster_core_hook + "\n" + ctxt[pos:]
 
-          insert_pos = min(m_in.start(), m_run.start())
-          ctxt = ctxt[:insert_pos] + leapster_core_hook + "\n" + ctxt[insert_pos:]
-
-          # Hook retro_set_input_state(retro_input_state_t ...)
-          ctxt, n_sub_in = re.subn(
+          ctxt, _ = re.subn(
               r"(void\s+retro_set_input_state\s*\(\s*retro_input_state_t\s+(\w+)\s*\)\s*\{)",
-              r"\1\n\tg_leapster_orig_input_cb = \2;\n\t\2 = leapster_input_state_cb;",
-              ctxt,
-              count=1
-          )
-          assert n_sub_in == 1, "Failed to hook retro_set_input_state in libretro-core.cpp"
+              r"\1\n\tg_leapster_orig_input_cb = \2;\n\t\2 = leapster_input_state_cb;", ctxt, count=1)
 
-          # Hook retro_run(void) to poll touch, enforce 60.0 FPS (16667 us) frame pacing, and log telemetry
-          ctxt, n_sub_run = re.subn(
+          ctxt, _ = re.subn(
               r"(void\s+retro_run\s*\(\s*(?:void)?\s*\)\s*\{)",
               r"""\1
               leapster_poll_touch_frame();
               {
-                  const uint64_t frame_budget_us = 16667ULL; // 60.0 FPS
+                  const uint64_t frame_budget_us = 16667ULL;
                   uint64_t now_us = leapster_monotonic_us();
                   if (g_leapster_last_frame_us != 0 && now_us > g_leapster_last_frame_us) {
                       uint64_t elapsed_us = now_us - g_leapster_last_frame_us;
@@ -607,67 +334,30 @@ jobs:
                       }
                   }
                   g_leapster_last_frame_us = now_us;
-              }
-              leapster_log_telemetry_tick();""",
-              ctxt,
-              count=1
-          )
-          assert n_sub_run == 1, "Failed to hook retro_run in libretro-core.cpp"
+              }""", ctxt, count=1)
 
           with open(core_path, "w") as f:
               f.write(ctxt)
-          print("Successfully patched libretro-core.cpp with LeapsterGS touchscreen + V5 telemetry + 60Hz lock!")
 
-          # 11. Inject Cortex-A9 optimization flags and 32-bit HIGH_DEF=1 into backends/platform/libretro/Makefile
+          # 7. Inject Cortex-A9 compiler flags into Makefile
           mk_file = "backends/platform/libretro/Makefile"
           with open(mk_file, "r") as f:
               mk = f.read()
-
           opt_flags = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fstrict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -fPIC"
-
-          inject_block = f"""
-          TARGET_64BIT := 0
-          HIGH_DEF := 1
-          OPENGL_SUPPORT := 0
-          USE_OPENGL := 0
-          HAVE_OPENGL := 0
-          USE_IMGUI := 0
-          USE_CURL := 0
-          USE_LIBCURL := 0
-          USE_CLOUD := 0
-          USE_BASIC_NET := 0
-          USE_SDL_NET := 0
-          USE_ALSA := 0
-          HAVE_NEON := 0
-          CFLAGS += {opt_flags}
-          CXXFLAGS += {opt_flags}
-          LDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl
-          """
+          inject_block = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt_flags}\nCXXFLAGS += {opt_flags}\nLDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl\n"
           mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inject_block + "\ninclude $(ROOT_PATH)/Makefile.common")
           mk = mk.replace("include Makefile.common", inject_block + "\ninclude Makefile.common")
           with open(mk_file, "w") as f:
               f.write(mk)
           EOF
 
-      - name: Compile Inside Ubuntu 18.04 Container (Cortex-A9 32-bit Color)
+      - name: Compile Inside Ubuntu 18.04 Container
         run: |
           docker run --rm -v "$PWD:/work" -w /work/scummvm-2026.4.0/backends/platform/libretro ubuntu:18.04 bash -c '
             set -e
             set -o pipefail
-
             apt-get update
-            apt-get install -y \
-              git \
-              ca-certificates \
-              pkg-config \
-              gcc-arm-linux-gnueabi \
-              g++-arm-linux-gnueabi \
-              binutils-arm-linux-gnueabi \
-              make \
-              zip \
-              unzip \
-              sed \
-              gawk
+            apt-get install -y git ca-certificates pkg-config gcc-arm-linux-gnueabi g++-arm-linux-gnueabi binutils-arm-linux-gnueabi make zip unzip sed gawk
 
             export CC="arm-linux-gnueabi-gcc"
             export CXX="arm-linux-gnueabi-g++"
@@ -677,68 +367,21 @@ jobs:
             export LD="arm-linux-gnueabi-g++"
             export STRIP="arm-linux-gnueabi-strip"
 
-            make \
-              platform=unix \
-              ARCH=arm \
-              TARGET_64BIT=0 \
-              HIGH_DEF=1 \
-              CC="$CC" \
-              CXX="$CXX" \
-              AR="$AR" \
-              RANLIB="$RANLIB" \
-              LD="$LD" \
-              LITE=1 \
-              NO_WIP=0 \
-              OPENGL_SUPPORT=0 \
-              USE_OPENGL=0 \
-              HAVE_OPENGL=0 \
-              USE_IMGUI=0 \
-              USE_CURL=0 \
-              USE_LIBCURL=0 \
-              USE_CLOUD=0 \
-              USE_BASIC_NET=0 \
-              USE_SDL_NET=0 \
-              USE_ALSA=0 \
-              USE_SEQ_MIDI=0 \
-              USE_SNDIO=0 \
-              USE_TIMIDITY=0 \
-              USE_MT32EMU=0 \
-              USE_FLUIDSYNTH=0 \
-              USE_FLAC=0 \
-              USE_VORBIS=0 \
-              USE_TREMOR=0 \
-              USE_MAD=0 \
-              USE_FAAD=0 \
-              USE_MPEG2=0 \
-              USE_THEORADEC=0 \
-              USE_FREETYPE2=0 \
-              USE_FRIBIDI=0 \
-              USE_PNG=1 \
-              USE_ZLIB=1 \
-              USE_JPEG=1 \
-              HAVE_NEON=0 \
-              -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
+            make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_VORBIS=0 USE_TREMOR=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
 
             $STRIP -s scummvm_libretro.so
-
             cp scummvm_libretro.so /work/scummvm_libretro.so
             if [ -f scummvm.zip ]; then cp scummvm.zip /work/scummvm.zip; fi
             if [ -f scummvm_libretro.info ]; then cp scummvm_libretro.info /work/scummvm_libretro.info; fi
-
-            echo "=== BUILD REPORT ===" > /work/build_report.txt
-            ls -lh /work/scummvm_libretro.so >> /work/build_report.txt
-            arm-linux-gnueabi-readelf -d /work/scummvm_libretro.so | grep NEEDED >> /work/build_report.txt
           '
-          ls -lh scummvm_libretro.so build_scummvm.log build_report.txt
 
-      - name: Upload ScummVM Libretro Core V5 + Datafiles + Build Log
+      - name: Upload ScummVM Libretro Core V6
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v5
+          name: scummvm_libretro_leapster_v6
           path: |
             scummvm_libretro.so
             scummvm.zip
             scummvm_libretro.info
             build_scummvm.log
-            build_report.txt
