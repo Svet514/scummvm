@@ -19,16 +19,21 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable scumm, scumm_7_8, he, and mediastation
+          # 1. Enable scumm, scumm_7_8, he, and mediastation (read BEFORE opening "w"!)
           for name in ["lite_engines.list", "engines.lite"]:
-              open(os.path.join("backends/platform/libretro", name), "w").write("scumm\nscumm_7_8\nhe\nmediastation\n")
+              with open(os.path.join("backends/platform/libretro", name), "w") as f:
+                  f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
           ms_cfg = "engines/mediastation/configure.engine"
           if os.path.exists(ms_cfg):
-              open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', open(ms_cfg).read()))
+              mtxt = open(ms_cfg, "r").read()
+              mtxt = re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt)
+              open(ms_cfg, "w").write(mtxt)
 
           with open("../upstream_inspect.txt", "w") as df:
               for p in ["backends/platform/libretro/include/libretro-defs.h", "backends/platform/libretro/src/libretro-core.cpp", "engines/scumm/he/animation_he.cpp"]:
-                  if os.path.exists(p): df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read())
+                  if os.path.exists(p):
+                      txt_p = open(p, errors="ignore").read()
+                      df.write(f"\n=== {p} ===\n" + txt_p)
 
           # 2. Generic detection unlock + auto-accept unsupported game dialog (V7/V8)
           adv = "engines/advancedDetector.cpp"
@@ -55,7 +60,7 @@ jobs:
           if os.path.exists("configure"):
               cfg = open("configure", errors="ignore").read()
               cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
-              cfg = re.sub(r"^(\s*_bink=).*$", r"\1yes", cfg, flags=re.M)
+              cfg = re.sub(r"^([ \t]*_bink=).*$", r"\1yes", cfg, flags=re.M)
               open("configure", "w").write(cfg)
 
           ssys = "common/scummsys.h"
@@ -67,7 +72,8 @@ jobs:
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD", "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
               if os.path.exists(mr):
-                  t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", open(mr).read())
+                  raw_mr = open(mr, "r").read()
+                  t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", raw_mr)
                   for v in dis: t = re.sub(rf"\b{v}\s*[:?]?=\s*1\b", f"{v} := 0", t)
                   t = re.sub(r"\bUSE_BINK\s*[:?]?=\s*0\b", "USE_BINK := 1", t)
                   open(mr, "w").write(t)
@@ -84,8 +90,7 @@ jobs:
 
           csh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(csh):
-              st = open(csh).read().replace("--disable-bink", "--enable-bink")
-              st = re.sub(r"^(\s*_bink=).*$", r"\1yes", st, flags=re.M)
+              st = open(csh, "r").read().replace("--disable-bink", "--enable-bink")
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
@@ -97,8 +102,8 @@ jobs:
                   st = open(fp, errors="ignore").read()
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
-                  ns = re.sub(r"^(\s*#define\s+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*\s+)2048\b", r"\g<1>8192", ns, flags=re.M)
-                  ns = re.sub(r"^(\s*#define\s+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*\s+\(?\s*)2(\s*\*)", r"\g<1>8\g<2>", ns, flags=re.M)
+                  ns = re.sub(r"^([ \t]*#define[ \t]+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*[ \t]+)2048\b", r"\g<1>8192", ns, flags=re.M)
+                  ns = re.sub(r"^([ \t]*#define[ \t]+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*[ \t]+\(?[ \t]*)2([ \t]*\*)", r"\g<1>8\g<2>", ns, flags=re.M)
                   if ns != st: open(fp, "w").write(ns)
 
           # 5. Clean V5/V7 getMillis, delayMillis, and updateScreen
@@ -124,9 +129,9 @@ jobs:
                       t, mod = t[:si] + nfn + t[ei:], True
                   if mod: open(fp, "w").write(ext + t)
 
-          # 6. Patch libretro-core.cpp: Touch + 240p Downscale (NULL dupe frame safe) + V13 Telemetry
+          # 6. Patch libretro-core.cpp: Touch + 240p Downscale + Cached Static Frame + V13 Telemetry
           cp = "backends/platform/libretro/src/libretro-core.cpp"
-          ct = open(cp).read()
+          ct = open(cp, "r").read()
           hook = r"""
           #include <fcntl.h>
           #include <unistd.h>
@@ -180,8 +185,8 @@ jobs:
                           for (unsigned y = 0; y < 240; ++y, o += 320, s += st) for (unsigned x = 0; x < 320; ++x) o[x] = s[x << 1];
                           g_dbpp = 2; g_orig_vid(g_d16, 320, 240, 640); return;
                       }
-                  } else if (g_dbpp == 4) { g_orig_vid(NULL, 320, 240, 1280); return; }
-                  else if (g_dbpp == 2) { g_orig_vid(NULL, 320, 240, 640); return; }
+                  } else if (g_dbpp == 4) { g_orig_vid(g_d32, 320, 240, 1280); return; }
+                  else if (g_dbpp == 2) { g_orig_vid(g_d16, 320, 240, 640); return; }
               }
               g_orig_vid(d, w, h, p);
           }
@@ -255,14 +260,16 @@ jobs:
           for i in range(bs, len(ct)):
               dp += (ct[i] == "{") - (ct[i] == "}")
               if dp == 0: be = i; break
-          open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
+          new_ct = ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:]
+          open(cp, "w").write(new_ct)
 
           # 7. Safe Cortex-A9 flags (NO -ffast-math so Bink RDFT/DCT float decode stays accurate!)
           mkf = "backends/platform/libretro/Makefile"
-          mk = open(mkf).read()
+          mk = open(mkf, "r").read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl\n"
-          open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common"))
+          new_mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common")
+          open(mkf, "w").write(new_mk)
           EOF
 
       - name: Compile Inside Ubuntu 18.04 Container
