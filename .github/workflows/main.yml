@@ -58,6 +58,12 @@ jobs:
               cfg = re.sub(r"^([ \t]*_bink=).*$", r"\1yes", cfg, flags=re.M)
               open("configure", "w").write(cfg)
 
+          ssys = "common/scummsys.h"
+          if os.path.exists(ssys):
+              stxt = open(ssys, errors="ignore").read()
+              stxt = re.sub(r'(#include\s+"config\.h")', r'\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif', stxt, count=1)
+              open(ssys, "w").write(stxt)
+
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD", "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
               if os.path.exists(mr):
@@ -93,22 +99,23 @@ jobs:
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Patch engines/scumm/he/animation_he.cpp: Linux backslash/Data subfolder fix + Smacker/Bink fallback + telemetry
+          # 5. Patch animation_he.cpp: ASCII 92 backslash fix + Data subfolder index + Smacker/Bink fallback
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read()
           anim_hdr = '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags);'
           anim_t = anim_t.replace('#include "common/scummsys.h"', anim_hdr, 1)
-          anim_load_fix = r"""
+          anim_load_fix = """
               static bool s_dirIndexed = false;
               if (!s_dirIndexed && ConfMan.hasKey("path")) {
                   SearchMan.addDirectory(ConfMan.getPath("path"), 0, 5, true);
                   s_dirIndexed = true;
               }
               Common::String rawStr = filename.toString();
-              for (uint idx = 0; idx < rawStr.size(); ++idx)
-                  if (rawStr[idx] == '\\') rawStr.setChar('/', idx);
+              for (uint idx = 0; idx < rawStr.size(); ++idx) {
+                  if ((byte)rawStr[idx] == 92) rawStr.setChar('/', idx);
+              }
               Common::Path normPath(rawStr, '/');
-              uint32 sl = rawStr.findLastOf('/');
+              size_t sl = rawStr.findLastOf('/');
               Common::String baseStr = (sl == Common::String::npos) ? rawStr : rawStr.substr(sl + 1);
               Common::Path baseOnly(baseStr, '/');
               bool loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
@@ -129,7 +136,7 @@ jobs:
               }
               leapster_telem_video(rawStr.c_str(), 1, _video->getWidth(), _video->getHeight(), flags);
           """
-          anim_t, n_anim = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', anim_load_fix, anim_t, count=1)
+          anim_t, n_anim = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_load_fix, anim_t, count=1)
           assert n_anim == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
@@ -160,11 +167,8 @@ jobs:
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 8192;", ct, count=1)
-          ct, n_arun = re.subn(
-              r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}",
-              "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 2048 ? 2048 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;",
-              ct, count=1, flags=re.S
-          )
+          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 2048 ? 2048 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
+          ct, n_arun = re.subn(r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}", lambda _: arun_rep, ct, count=1, flags=re.S)
           assert n_abuf == 1 and n_arun == 1, f"Audio patch failed: abuf={n_abuf}, arun={n_arun}"
 
           hook = r"""
@@ -174,8 +178,16 @@ jobs:
           #include <string.h>
           #include <stdint.h>
           #include <time.h>
+          #include <math.h>
           #include <linux/input.h>
           #include <sys/ioctl.h>
+          extern "C" {
+          float __wrap_expf(float x) { return (float)exp((double)x); }
+          float __wrap_exp2f(float x) { return (float)pow(2.0, (double)x); }
+          float __wrap_logf(float x) { return (float)log((double)x); }
+          float __wrap_log2f(float x) { return (float)(log((double)x) * 1.4426950408889634); }
+          float __wrap_powf(float x, float y) { return (float)pow((double)x, (double)y); }
+          }
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
           static retro_video_refresh_t g_orig_vid = NULL;
@@ -297,11 +309,12 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. Restore exact V12 Cortex-A9 flags (-ffast-math avoids GLIBC_2.27 libm symbols so dlopen succeeds!)
+          # 8. V12 Cortex-A9 flags + --wrap GLIBC_2.27 float math symbols
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
-          opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -fPIC"
-          inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += -Wl,-Bsymbolic -Wl,-Bsymbolic-functions -static-libstdc++ -static-libgcc -lpthread -lm -ldl\n"
+          opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
+          ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
+          inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
           new_mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common")
           open(mkf, "w").write(new_mk)
           EOF
@@ -315,6 +328,8 @@ jobs:
             make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_VORBIS=0 USE_TREMOR=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
             echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
+            echo "=== UNDEFINED C++ SYMBOLS ===" >> /work/build_report.txt
+            arm-linux-gnueabi-nm -D -u scummvm_libretro.so | grep "_Z" >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
             cp scummvm_libretro.so /work/scummvm_libretro.so
             [ -f scummvm.zip ] && cp scummvm.zip /work/scummvm.zip || true
