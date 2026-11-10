@@ -27,7 +27,7 @@ jobs:
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', open(ms_cfg).read()))
 
           with open("../upstream_inspect.txt", "w") as df:
-              for p in ["backends/platform/libretro/include/libretro-defs.h", "backends/platform/libretro/src/libretro-core.cpp", "backends/platform/libretro/src/libretro-os-base.cpp", "backends/platform/libretro/src/libretro-os-utils.cpp", "engines/mediastation/actors/sound.cpp"]:
+              for p in ["backends/platform/libretro/include/libretro-defs.h", "backends/platform/libretro/src/libretro-core.cpp", "engines/scumm/he/animation_he.cpp"]:
                   if os.path.exists(p): df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read())
 
           # 2. Generic detection unlock + auto-accept unsupported game dialog (V7/V8)
@@ -49,14 +49,20 @@ jobs:
                       if "detection" in fn: nt = re.sub(r"\bADGF_(?:UNSTABLE|TESTING)\b", "0", nt)
                       if nt != t: open(fp, "w").write(nt)
 
-          # 3. Disable unused libs while explicitly enabling Bink in configure + Makefiles (fixes Steve black!)
+          # 3. Disable unused libs while enabling internal Bink video decoder (fixes Steve black!)
           for mk in ["backends/imgui/module.mk", "backends/networking/basic/module.mk", "backends/networking/curl/module.mk", "backends/networking/http/module.mk", "backends/networking/sdl_net/module.mk", "backends/cloud/module.mk"]:
               if os.path.exists(mk): open(mk, "w").write("# Disabled\n")
           if os.path.exists("configure"):
               cfg = open("configure", errors="ignore").read()
               cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
-              cfg = re.sub(r"^_bink=.*$", "_bink=yes", cfg, flags=re.M)
+              cfg = re.sub(r"^(\s*_bink=).*$", r"\1yes", cfg, flags=re.M)
               open("configure", "w").write(cfg)
+
+          ssys = "common/scummsys.h"
+          if os.path.exists(ssys):
+              stxt = open(ssys, errors="ignore").read()
+              stxt = re.sub(r'(#include\s+"config\.h")', r'\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif', stxt, count=1)
+              open(ssys, "w").write(stxt)
 
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD", "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
@@ -79,11 +85,11 @@ jobs:
           csh = "backends/platform/libretro/scripts/configure_engines.sh"
           if os.path.exists(csh):
               st = open(csh).read().replace("--disable-bink", "--enable-bink")
+              st = re.sub(r"^(\s*_bink=).*$", r"\1yes", st, flags=re.M)
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
-              st = re.sub(r"(/configure\b)", r"\1 --enable-bink", st, count=1)
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER + quadruple 2048-frame Libretro audio mix ceiling -> 8192
+          # 4. Force RETRO_DEVICE_POINTER + quadruple 2048-frame Libretro audio buffer ceiling -> 8192
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -92,13 +98,7 @@ jobs:
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
                   ns = re.sub(r"^(\s*#define\s+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*\s+)2048\b", r"\g<1>8192", ns, flags=re.M)
-                  ns = re.sub(r"^(\s*#define\s+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*\s+\(?\s*)2(\s*\*\s*\w+)", r"\g<1>8\g<2>", ns, flags=re.M)
-                  m_mix = re.search(r"mixCallback\s*\(", ns)
-                  if m_mix:
-                      w0, w1 = max(0, m_mix.start() - 900), min(len(ns), m_mix.end() + 900)
-                      win = re.sub(r"\b(2048|4096|8192)\b", lambda m: str(int(m.group(1)) * 4), ns[w0:w1])
-                      win = re.sub(r"\b2(\s*\*\s*AUDIO_BATCH)", r"8\1", win)
-                      ns = ns[:w0] + win + ns[w1:]
+                  ns = re.sub(r"^(\s*#define\s+\w*(?:AUDIO|SOUND|SAMPLE|BUFF)\w*\s+\(?\s*)2(\s*\*)", r"\g<1>8\g<2>", ns, flags=re.M)
                   if ns != st: open(fp, "w").write(ns)
 
           # 5. Clean V5/V7 getMillis, delayMillis, and updateScreen
@@ -257,7 +257,7 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 7. Safe Cortex-A9 compiler flags (NO -ffast-math so Bink RDFT/DCT float decode stays accurate!)
+          # 7. Safe Cortex-A9 flags (NO -ffast-math so Bink RDFT/DCT float decode stays accurate!)
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf).read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
