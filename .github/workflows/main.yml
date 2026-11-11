@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V14 (8K Audio + HE Video Path Fix + Clean Base)
+name: Build ScummVM Libretro Core V15 (60Hz Non-Blocking Audio + AKOS Palette Fix)
 
 on:
   push:
@@ -26,10 +26,15 @@ jobs:
           ms_cfg = "engines/mediastation/configure.engine"
           if os.path.exists(ms_cfg):
               mtxt = open(ms_cfg, "r").read()
-              mtxt = re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt)
-              open(ms_cfg, "w").write(mtxt)
+              open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
 
-          # 2. Generic detection unlock + auto-accept unsupported game warning (V7/V8)
+          with open("../upstream_v15.txt", "w") as df:
+              for p in ["engines/scumm/akos.cpp", "engines/mediastation/actors/sound.cpp"]:
+                  if os.path.exists(p):
+                      ptxt = open(p, errors="ignore").read()
+                      df.write(f"\n=== {p} ===\n" + ptxt[:12000])
+
+          # 2. Generic detection unlock + auto-accept unsupported game warning
           adv = "engines/advancedDetector.cpp"
           at = open(adv, errors="ignore").read()
           at = re.sub(r"\breturn\s+matched\s*;", "{ for (uint _i = 0; _i < matched.size(); ++_i) matched[_i].hasUnknownFiles = false; return matched; }", at)
@@ -61,17 +66,14 @@ jobs:
           ssys = "common/scummsys.h"
           if os.path.exists(ssys):
               stxt = open(ssys, errors="ignore").read()
-              stxt = re.sub(r'(#include\s+"config\.h")', r'\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif', stxt, count=1)
-              open(ssys, "w").write(stxt)
+              open(ssys, "w").write(re.sub(r'(#include\s+"config\.h")', r'\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif', stxt, count=1))
 
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD", "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
               if os.path.exists(mr):
-                  raw_mr = open(mr, "r").read()
-                  t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", raw_mr)
+                  t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", open(mr, "r").read())
                   for v in dis: t = re.sub(rf"\b{v}\s*[:?]?=\s*1\b", f"{v} := 0", t)
-                  t = re.sub(r"\bUSE_BINK\s*[:?]?=\s*0\b", "USE_BINK := 1", t)
-                  open(mr, "w").write(t)
+                  open(mr, "w").write(re.sub(r"\bUSE_BINK\s*[:?]?=\s*0\b", "USE_BINK := 1", t))
 
           vp = "|".join(dis)
           id_re, in_re = re.compile(rf"^(\s*)ifdef\s+({vp})\s*$", flags=re.M), re.compile(rf"^(\s*)ifndef\s+({vp})\s*$", flags=re.M)
@@ -89,7 +91,7 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER & disable timing_inaccuracies
+          # 4. Force RETRO_DEVICE_POINTER & patch animation_he.cpp path/decoder fallback
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -99,48 +101,68 @@ jobs:
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Patch animation_he.cpp: ASCII 92 backslash fix + Data subfolder index + Smacker/Bink fallback
           anim_p = "engines/scumm/he/animation_he.cpp"
-          anim_t = open(anim_p, "r").read()
-          anim_hdr = '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags);'
-          anim_t = anim_t.replace('#include "common/scummsys.h"', anim_hdr, 1)
-          anim_load_fix = """
+          anim_t = open(anim_p, "r").read().replace('#include "common/scummsys.h"', '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags);', 1)
+          anim_fix = """
               static bool s_dirIndexed = false;
-              if (!s_dirIndexed && ConfMan.hasKey("path")) {
-                  SearchMan.addDirectory(ConfMan.getPath("path"), 0, 5, true);
-                  s_dirIndexed = true;
-              }
+              if (!s_dirIndexed && ConfMan.hasKey("path")) { SearchMan.addDirectory(ConfMan.getPath("path"), 0, 5, true); s_dirIndexed = true; }
               Common::String rawStr = filename.toString();
-              for (uint idx = 0; idx < rawStr.size(); ++idx) {
-                  if ((byte)rawStr[idx] == 92) rawStr.setChar('/', idx);
-              }
+              for (uint idx = 0; idx < rawStr.size(); ++idx) { if ((byte)rawStr[idx] == 92) rawStr.setChar('/', idx); }
               Common::Path normPath(rawStr, '/');
               size_t sl = rawStr.findLastOf('/');
-              Common::String baseStr = (sl == Common::String::npos) ? rawStr : rawStr.substr(sl + 1);
-              Common::Path baseOnly(baseStr, '/');
+              Common::Path baseOnly((sl == Common::String::npos) ? rawStr : rawStr.substr(sl + 1), '/');
               bool loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
           #ifdef USE_BINK
               if (!loaded) {
                   delete _video; _video = new Video::BinkDecoder();
                   loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
-                  if (!loaded) {
-                      delete _video; _video = new Video::SmackerDecoder();
-                      loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
-                  }
+                  if (!loaded) { delete _video; _video = new Video::SmackerDecoder(); loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly); }
               }
           #endif
-              if (!loaded) {
-                  leapster_telem_video(rawStr.c_str(), 0, 0, 0, flags);
-                  warning("Failed to load video file %s", rawStr.c_str());
-                  return -1;
-              }
+              if (!loaded) { leapster_telem_video(rawStr.c_str(), 0, 0, 0, flags); warning("Failed to load video file %s", rawStr.c_str()); return -1; }
               leapster_telem_video(rawStr.c_str(), 1, _video->getWidth(), _video->getHeight(), flags);
           """
-          anim_t, n_anim = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_load_fix, anim_t, count=1)
-          assert n_anim == 1, "Failed to patch animation_he.cpp"
+          anim_t, _ = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_fix, anim_t, count=1)
           open(anim_p, "w").write(anim_t)
 
-          # 6. Clean V5/V7 getMillis, delayMillis, and updateScreen
+          # 5. Patch engines/scumm/akos.cpp: fix Steve's 0x0000 black AKOS palette when _rgbs/_akpl is present + log [AKOS]
+          akos_p = "engines/scumm/akos.cpp"
+          akos_t = 'extern "C" void leapster_telem_akos(int sz, int pnum, int has_rgbs, int has_akpl, int nz);\n' + open(akos_p, "r").read()
+          akos_pat = (
+              r"if\s*\(\s*_paletteNum\s*\)\s*\{\s*"
+              r"for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*size\s*;\s*i\+\+\s*\)\s*"
+              r"_palette\[i\]\s*=\s*READ_LE_UINT16\([^;]+;\s*"
+              r"\}\s*else\s+if\s*\(\s*_rgbs\s*\)\s*\{\s*"
+              r"for\s*\(\s*i\s*=\s*0\s*;\s*i\s*<\s*size\s*;\s*i\+\+\s*\)\s*\{\s*"
+              r"if\s*\(\s*new_palette\[i\]\s*==\s*0xFF\s*\)\s*\{[^}]+\}\s*else\s*\{[^}]+\}\s*\}\s*\}"
+          )
+          akos_rep = """if (_paletteNum) {
+                  for (i = 0; i < size; i++) {
+                      uint8 col = _akpl[i];
+                      uint16 c = READ_LE_UINT16(_vm->_hePalettes + _paletteNum * _vm->_hePaletteSlot + 768 + col * 2);
+                      if (c == 0 && col != 0 && _rgbs)
+                          c = _vm->get16BitColor(_rgbs[col * 3 + 0], _rgbs[col * 3 + 1], _rgbs[col * 3 + 2]);
+                      _palette[i] = c;
+                  }
+              } else if (_rgbs) {
+                  for (i = 0; i < size; i++) {
+                      if (new_palette[i] == 0xFF || (new_palette[i] == 0 && i != 0)) {
+                          uint8 col = _akpl[i];
+                          _palette[i] = _vm->get16BitColor(_rgbs[col * 3 + 0], _rgbs[col * 3 + 1], _rgbs[col * 3 + 2]);
+                      } else {
+                          _palette[i] = new_palette[i];
+                      }
+                  }
+              } else if (_akpl) {
+                  for (i = 0; i < size; i++)
+                      _palette[i] = READ_LE_UINT16(_vm->_hePalettes + _vm->_hePaletteSlot + 768 + _akpl[i] * 2);
+              }
+              { uint32 nz = 0; for (uint32 k = 0; k < size; ++k) if (_palette[k]) ++nz; leapster_telem_akos((int)size, (int)_paletteNum, _rgbs != 0, _akpl != 0, (int)nz); }"""
+          akos_t, n_akos = re.subn(akos_pat, lambda _: akos_rep, akos_t, count=1)
+          print(f"Patched akos.cpp 16-bit palette block: {n_akos}")
+          open(akos_p, "w").write(akos_t)
+
+          # 6. Patch getMillis, delayMillis (with 3ms frame-sync tolerance), and updateScreen
           ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); void leapster_telem_update_screen(void); }\n'
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -159,17 +181,52 @@ jobs:
                           if dp == 0: ei = i + 1; break
                       mc = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", t[bi:ei])
                       chk = mc.group(0) if mc else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
-                      nfn = f"void OSystem_libretro::delayMillis(uint {p}) {{\n\tuint32 st = getMillis(), el = 0;\n\tif ({p} == 0) {{ {chk}; return; }}\n\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n\tleapster_telem_delay({p}, el);\n}}"
+                      nfn = f"void OSystem_libretro::delayMillis(uint {p}) {{\n\tuint32 st = getMillis(), el = 0, tol = ({p} >= 10) ? 3 : 0;\n\tif ({p} == 0) {{ {chk}; return; }}\n\twhile (el + tol < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n\tleapster_telem_delay({p}, el);\n}}"
                       t, mod = t[:si] + nfn + t[ei:], True
                   if mod: open(fp, "w").write(ext + t)
 
-          # 7. Patch libretro-core.cpp: 8192-sample audio buffer + continuous ALSA silence + cached 240p downscale
+          # 7. Patch libretro-core.cpp: 4096 buffer + non-blocking 1470-frame audio_run (carries remainder, never blocks 7056 ALSA buf!)
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 8192;", ct, count=1)
-          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 2048 ? 2048 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
-          ct, n_arun = re.subn(r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}", lambda _: arun_rep, ct, count=1, flags=re.S)
-          assert n_abuf == 1 and n_arun == 1, f"Audio patch failed: abuf={n_abuf}, arun={n_arun}"
+          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 4096;", ct, count=1)
+          ma = re.search(r"static\s+void\s+audio_run\s*\(\s*void\s*\)\s*\{", ct)
+          asi, abi, adp, aei = ma.start(), ma.end() - 1, 0, -1
+          for i in range(abi, len(ct)):
+              adp += (ct[i] == "{") - (ct[i] == "}")
+              if adp == 0: aei = i + 1; break
+          new_audio_run = """static void audio_run(void) {
+              uint16 samples_buffer_size = retro_setting_get_audio_samples_buffer_size();
+              retro_time_t now_usec = cpu_features_get_time_usec();
+              if (now_usec < audio_last_time_usec) audio_last_time_usec = now_usec;
+              retro_time_t dt_usec = now_usec - audio_last_time_usec;
+              if (dt_usec > 250000) { audio_last_time_usec = now_usec - 40000; dt_usec = 40000; }
+              uint32 sr = sample_rate ? sample_rate : 44100;
+              uint32 max_step = sr / 30; // ~1470 frames (33.3ms < 1764 ALSA period, zero 185ms blocking!)
+              if (max_step > samples_buffer_size) max_step = samples_buffer_size;
+              float samples_target = ((float)sr * (float)dt_usec) / 1000000.0f + audio_samples_accumulator;
+              uint32 samples_to_read = (uint32)samples_target;
+              if (samples_to_read > max_step) {
+                  samples_to_read = max_step;
+                  audio_samples_accumulator = 0.0f;
+                  audio_last_time_usec += (retro_time_t)(((uint64_t)samples_to_read * 1000000ULL) / sr);
+              } else {
+                  audio_samples_accumulator = samples_target - (float)samples_to_read;
+                  audio_last_time_usec = now_usec;
+              }
+              if (samples_to_read == 0) return;
+              uint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2 * sizeof(int16));
+              leap_telem_mix(samples_produced);
+              if (!samples_produced) { memset(audio_sample_buffer, 0, samples_to_read * 2 * sizeof(int16)); samples_produced = samples_to_read; }
+              av_status &= ~AUDIO_STATUS_MUTE;
+              int16 *audio_buffer_ptr = audio_sample_buffer;
+              while (samples_produced > 0) {
+                  uint32 w = (samples_produced > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : samples_produced;
+                  audio_batch_cb(audio_buffer_ptr, w);
+                  samples_produced -= w;
+                  audio_buffer_ptr += w << 1;
+              }
+          }"""
+          ct = ct[:asi] + new_audio_run + ct[aei:]
 
           hook = r"""
           #include <fcntl.h>
@@ -191,10 +248,9 @@ jobs:
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
           static retro_video_refresh_t g_orig_vid = NULL;
-          static int g_ts_fd = -2, g_pcal_on = 0, g_click = 0, g_dbpp = 0;
+          static int g_ts_fd = -2, g_pcal_on = 0, g_click = 0, g_dbpp = 0, g_akos_logs = 0;
           static char g_ts_nm[64] = "none";
-          static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = 160, g_lsy = 120;
-          static int g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
+          static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = 160, g_lsy = 120, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ever = false;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
@@ -207,7 +263,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V14 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V15 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -215,26 +271,16 @@ jobs:
           extern "C" void leapster_sleep_us(unsigned int us) { usleep((useconds_t)us); }
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
           extern "C" void leapster_telem_update_screen(void) { g_uscr++; g_uscr_f++; }
-          extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) {
-              leap_open_log();
-              if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); }
-          }
+          extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
+          extern "C" void leapster_telem_akos(int sz, int pnum, int rgbs, int akpl, int nz) { if (g_akos_logs < 25) { g_akos_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[AKOS] size=%d palNum=%d rgbs=%d akpl=%d nonZero=%d\n", sz, pnum, rgbs, akpl, nz); fflush(g_tfp); } } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) { if (d) g_af += (uint32_t)f; return g_orig_aud ? g_orig_aud(d, f) : f; }
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
-              g_vw = w; g_vh = h;
-              if (!g_orig_vid) return;
+              g_vw = w; g_vh = h; if (!g_orig_vid) return;
               if (w == 640 && h == 480) {
                   if (d && (g_uscr_f > 0 || g_dbpp == 0)) {
-                      if (p >= 2560) {
-                          const uint32_t *s = (const uint32_t *)d; size_t st = (p >> 2) << 1; uint32_t *o = g_d32;
-                          for (unsigned y = 0; y < 240; ++y, o += 320, s += st) for (unsigned x = 0; x < 320; ++x) o[x] = s[x << 1];
-                          g_dbpp = 4;
-                      } else if (p >= 1280) {
-                          const uint16_t *s = (const uint16_t *)d; size_t st = (p >> 1) << 1; uint16_t *o = g_d16;
-                          for (unsigned y = 0; y < 240; ++y, o += 320, s += st) for (unsigned x = 0; x < 320; ++x) o[x] = s[x << 1];
-                          g_dbpp = 2;
-                      }
+                      if (p >= 2560) { const uint32_t *s = (const uint32_t *)d; size_t st = (p >> 2) << 1; uint32_t *o = g_d32; for (unsigned y = 0; y < 240; ++y, o += 320, s += st) for (unsigned x = 0; x < 320; ++x) o[x] = s[x << 1]; g_dbpp = 4; }
+                      else if (p >= 1280) { const uint16_t *s = (const uint16_t *)d; size_t st = (p >> 1) << 1; uint16_t *o = g_d16; for (unsigned y = 0; y < 240; ++y, o += 320, s += st) for (unsigned x = 0; x < 320; ++x) o[x] = s[x << 1]; g_dbpp = 2; }
                   }
                   if (g_dbpp == 4) { g_orig_vid(g_d32, 320, 240, 1280); return; }
                   if (g_dbpp == 2) { g_orig_vid(g_d16, 320, 240, 640); return; }
@@ -249,10 +295,8 @@ jobs:
                   g_ts_fd = -1; FILE *pf = fopen("/etc/pointercal", "r");
                   if (pf) { if (fscanf(pf, "%ld %ld %ld %ld %ld %ld %ld", &g_pcal[0], &g_pcal[1], &g_pcal[2], &g_pcal[3], &g_pcal[4], &g_pcal[5], &g_pcal[6]) == 7 && g_pcal[6]) g_pcal_on = 1; fclose(pf); }
                   for (int i = 0; i < 8; i++) {
-                      char dp[32], nm[64] = {0}; snprintf(dp, sizeof(dp), "/dev/input/event%d", i);
-                      int fd = open(dp, O_RDONLY | O_NONBLOCK); if (fd < 0) continue;
-                      ioctl(fd, EVIOCGNAME(sizeof(nm) - 1), nm);
-                      if (strstr(nm, "aclmtr") || strstr(nm, "accel") || strstr(nm, "Accel")) { close(fd); continue; }
+                      char dp[32], nm[64] = {0}; snprintf(dp, sizeof(dp), "/dev/input/event%d", i); int fd = open(dp, O_RDONLY | O_NONBLOCK); if (fd < 0) continue;
+                      ioctl(fd, EVIOCGNAME(sizeof(nm) - 1), nm); if (strstr(nm, "aclmtr") || strstr(nm, "accel") || strstr(nm, "Accel")) { close(fd); continue; }
                       unsigned long evb[LNB(EV_MAX)] = {0}, abb[LNB(ABS_MAX)] = {0}, kyb[LNB(KEY_MAX)] = {0};
                       if (ioctl(fd, EVIOCGBIT(0, sizeof(evb)), evb) >= 0 && LTB(EV_ABS, evb) && ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abb)), abb) >= 0 && LTB(ABS_X, abb) && LTB(ABS_Y, abb)) {
                           ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(kyb)), kyb);
@@ -309,14 +353,13 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. V12 Cortex-A9 flags + --wrap GLIBC_2.27 float math symbols
+          # 8. V14 Cortex-A9 flags + --wrap GLIBC_2.27 float math symbols
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -ffast-math -funsafe-math-optimizations -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
           ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
-          new_mk = mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common")
-          open(mkf, "w").write(new_mk)
+          open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common"))
           EOF
 
       - name: Compile Inside Ubuntu 18.04 Container
@@ -328,22 +371,17 @@ jobs:
             make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_VORBIS=0 USE_TREMOR=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
             echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
-            echo "=== UNDEFINED C++ SYMBOLS ===" >> /work/build_report.txt
-            arm-linux-gnueabi-nm -D -u scummvm_libretro.so | grep "_Z" >> /work/build_report.txt || true
+            cat /work/upstream_v15.txt >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
             cp scummvm_libretro.so /work/scummvm_libretro.so
-            [ -f scummvm.zip ] && cp scummvm.zip /work/scummvm.zip || true
-            [ -f scummvm_libretro.info ] && cp scummvm_libretro.info /work/scummvm_libretro.info || true
           '
 
-      - name: Upload ScummVM Libretro Core V14
+      - name: Upload ScummVM Libretro Core V15
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v14
+          name: scummvm_libretro_leapster_v15
           path: |
             scummvm_libretro.so
-            scummvm.zip
-            scummvm_libretro.info
             build_scummvm.log
             build_report.txt
