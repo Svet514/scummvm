@@ -94,7 +94,7 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER in libretro options
+          # 4. Force RETRO_DEVICE_POINTER cleanly in libretro options
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -102,13 +102,16 @@ jobs:
                   st = open(fp, errors="ignore").read()
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
-                  ns = re.sub(r"(updating_variables\s*=\s*false\s*;)", r"pointer_device = RETRO_DEVICE_POINTER; \1", ns)
+                  ns = ns.replace("pointer_device = RETRO_DEVICE_JOYPAD", "pointer_device = RETRO_DEVICE_POINTER")
+                  ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Patch scumm.h + animation_he.cpp: 8-bit (gf16=0, hev=98) Steve vfImageSurface palette & _hePalettes slot 1 fix
+          # 5. Patch scumm.h + animation_he.cpp: 8-bit (gf16=0, hev=98) Steve vfImageSurface palette fix + [PAL8] telemetry
           sch_p = "engines/scumm/scumm.h"
           sch_t = open(sch_p, "r").read()
-          sch_t, _ = re.subn(r"(class\s+ScummEngine\s*:[^{]+\{)", r"class MoviePlayer;\n\1\npublic:\n\tfriend class MoviePlayer;", sch_t, count=1)
+          assert "_currentPalette" in sch_t and "setDirtyColors" in sch_t, "Missing palette members in scumm.h"
+          sch_t, n_fr = re.subn(r"(class\s+ScummEngine\s*:[^{]+\{)", r"class MoviePlayer;\n\1\n\tfriend class MoviePlayer;", sch_t, count=1)
+          assert n_fr == 1, "Failed to add friend MoviePlayer in scumm.h"
           open(sch_p, "w").write(sch_t)
 
           anim_p = "engines/scumm/he/animation_he.cpp"
@@ -145,14 +148,9 @@ jobs:
           \t\t\t\tint vr = vpal[c * 3] << sh, vg = vpal[c * 3 + 1] << sh, vb = vpal[c * 3 + 2] << sh;
           \t\t\t\tint cr = _vm->_currentPalette[c * 3], cg = _vm->_currentPalette[c * 3 + 1], cb = _vm->_currentPalette[c * 3 + 2];
           \t\t\t\tif (!smp_v && (vr | vg | vb)) { smp_v = (vr << 16) | (vg << 8) | vb; smp_c = (cr << 16) | (cg << 8) | cb; }
-          \t\t\t\tif (vr != cr || vg != cg || vb != cb) {
+          \t\t\t\tif ((vr > 32 || vg > 32 || vb > 32) && cr < 64 && cg < 64 && cb < 64) {
           \t\t\t\t\t_vm->_currentPalette[c * 3] = vr; _vm->_currentPalette[c * 3 + 1] = vg; _vm->_currentPalette[c * 3 + 2] = vb;
           \t\t\t\t\t++fixed;
-          \t\t\t\t}
-          \t\t\t\tif (_vm->_hePalettes && _vm->_hePaletteSlot >= 1024) {
-          \t\t\t\t\tbyte *hp = _vm->_hePalettes + _vm->_hePaletteSlot;
-          \t\t\t\t\thp[c * 3] = vr; hp[c * 3 + 1] = vg; hp[c * 3 + 2] = vb;
-          \t\t\t\t\tif (hp[768 + c] != (byte)c) { hp[768 + c] = (byte)c; ++fixed; }
           \t\t\t\t}
           \t\t\t}
           \t\t\tif (fixed > 0) _vm->setDirtyColors(1, 254);
