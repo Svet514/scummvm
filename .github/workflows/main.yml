@@ -5,9 +5,13 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+concurrency:
+  group: scummvm-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Clone & Patch ScummVM v2026.4.0
@@ -90,7 +94,7 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER + deduplicate stationary EVENT_MOUSEMOVE (fixes "Which-which-which" rollover loop!)
+          # 4. Force RETRO_DEVICE_POINTER in libretro options
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -101,29 +105,16 @@ jobs:
                   ns = re.sub(r"(updating_variables\s*=\s*false\s*;)", r"pointer_device = RETRO_DEVICE_POINTER; \1", ns)
                   if ns != st: open(fp, "w").write(ns)
 
-          dev_ev = "backends/events/default/default-events.cpp"
-          det = open(dev_ev, "r").read()
-          mm_dedup = """bool result = _boss->pollEvent(event);
-          \tstatic int16 s_lastMx = -32768, s_lastMy = -32768;
-          \twhile (result && event.type == Common::EVENT_MOUSEMOVE && event.mouse.x == s_lastMx && event.mouse.y == s_lastMy)
-          \t\tresult = _boss->pollEvent(event);
-          \tif (result && event.type == Common::EVENT_MOUSEMOVE) { s_lastMx = event.mouse.x; s_lastMy = event.mouse.y; }"""
-          det, n_de = re.subn(r"bool\s+result\s*=\s*_boss->pollEvent\s*\(\s*event\s*\)\s*;", lambda _: mm_dedup, det, count=1)
-          assert n_de == 1, "Failed to patch default-events.cpp"
-          open(dev_ev, "w").write(det)
-
-          # 5. Patch scumm.h + animation_he.cpp: 8-bit (gf16=0, hev=98) Steve vfImageSurface palette restore + [PAL8] telemetry
+          # 5. Patch scumm.h + animation_he.cpp: 8-bit (gf16=0, hev=98) Steve vfImageSurface palette & _hePalettes slot 1 fix
           sch_p = "engines/scumm/scumm.h"
           sch_t = open(sch_p, "r").read()
-          assert "_currentPalette" in sch_t and "setDirtyColors" in sch_t, "Missing _currentPalette/setDirtyColors in scumm.h"
-          sch_t, n_fr = re.subn(r"(class\s+ScummEngine\s*:\s*public\s+Engine\s*\{)", r"class MoviePlayer;\n\1\n\tfriend class MoviePlayer;", sch_t, count=1)
-          assert n_fr == 1, "Failed to add friend MoviePlayer in scumm.h"
+          sch_t, _ = re.subn(r"(class\s+ScummEngine\s*:[^{]+\{)", r"class MoviePlayer;\n\1\npublic:\n\tfriend class MoviePlayer;", sch_t, count=1)
           open(sch_p, "w").write(sch_t)
 
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
-              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, int gf16, int hev); void leapster_telem_pal8(int wiz, int tr, int used, int fixed, int vr, int cr); }', 1
+              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, int gf16, int hev); void leapster_telem_pal8(int wiz, int slot, int tr, int used, int fixed, int mv, int sv, int sc); }', 1
           )
           anim_fix = """
               static bool s_dirIndexed = false;
@@ -144,31 +135,35 @@ jobs:
           \t\tif ((_flags & vfImageSurface) && vpal && w > 0 && h > 0) {
           \t\t\tuint8 tr = src[0], seen[256] = {0};
           \t\t\tfor (uint32 n = 0, tot = w * h; n < tot; ++n) if (src[n] != tr) seen[src[n]] = 1;
+          \t\t\tint max_v = 0;
+          \t\t\tfor (int k = 0; k < 768; ++k) if (vpal[k] > max_v) max_v = vpal[k];
+          \t\t\tint sh = (max_v > 0 && max_v <= 63) ? 2 : 0;
           \t\t\tint used = 0, fixed = 0, smp_v = 0, smp_c = 0;
           \t\t\tfor (int c = 1; c < 255; ++c) {
-          \t\t\t\tif (!seen[c]) continue;
+          \t\t\t\tif (!seen[c] || c == (int)tr) continue;
           \t\t\t\t++used;
-          \t\t\t\tint vr = vpal[c * 3], vg = vpal[c * 3 + 1], vb = vpal[c * 3 + 2];
+          \t\t\t\tint vr = vpal[c * 3] << sh, vg = vpal[c * 3 + 1] << sh, vb = vpal[c * 3 + 2] << sh;
           \t\t\t\tint cr = _vm->_currentPalette[c * 3], cg = _vm->_currentPalette[c * 3 + 1], cb = _vm->_currentPalette[c * 3 + 2];
           \t\t\t\tif (!smp_v && (vr | vg | vb)) { smp_v = (vr << 16) | (vg << 8) | vb; smp_c = (cr << 16) | (cg << 8) | cb; }
-          \t\t\t\tif ((vr > 32 || vg > 32 || vb > 32) && cr < 28 && cg < 28 && cb < 28) {
+          \t\t\t\tif (vr != cr || vg != cg || vb != cb) {
           \t\t\t\t\t_vm->_currentPalette[c * 3] = vr; _vm->_currentPalette[c * 3 + 1] = vg; _vm->_currentPalette[c * 3 + 2] = vb;
-          \t\t\t\t\tif (_vm->_hePalettes && _vm->_hePaletteSlot >= 768) {
-          \t\t\t\t\t\tbyte *hp = _vm->_hePalettes + _vm->_hePaletteSlot + c * 3;
-          \t\t\t\t\t\thp[0] = vr; hp[1] = vg; hp[2] = vb;
-          \t\t\t\t\t}
           \t\t\t\t\t++fixed;
+          \t\t\t\t}
+          \t\t\t\tif (_vm->_hePalettes && _vm->_hePaletteSlot >= 1024) {
+          \t\t\t\t\tbyte *hp = _vm->_hePalettes + _vm->_hePaletteSlot;
+          \t\t\t\t\thp[c * 3] = vr; hp[c * 3 + 1] = vg; hp[c * 3 + 2] = vb;
+          \t\t\t\t\tif (hp[768 + c] != (byte)c) { hp[768 + c] = (byte)c; ++fixed; }
           \t\t\t\t}
           \t\t\t}
           \t\t\tif (fixed > 0) _vm->setDirtyColors(1, 254);
-          \t\t\tleapster_telem_pal8((int)_wizResNum, (int)tr, used, fixed, smp_v, smp_c);
+          \t\t\tleapster_telem_pal8((int)_wizResNum, (int)_vm->_hePaletteSlot, (int)tr, used, fixed, max_v, smp_v, smp_c);
           \t\t}
           \t\tdst += y * pitch + x;"""
-          anim_t, n_p8 = re.subn(r"\t\}\s*else\s*\{\s*\n\t\tdst\s*\+=\s*y\s*\*\s*pitch\s*\+\s*x\s*;", lambda _: pal8_fix, anim_t, count=1)
+          anim_t, n_p8 = re.subn(r"\t\}\s*else\s*\{\s*\n\s*dst\s*\+=\s*y\s*\*\s*pitch\s*\+\s*x\s*;", lambda _: pal8_fix, anim_t, count=1)
           assert n_p8 == 1, "Failed to patch 8-bit branch in animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 6. Patch getMillis, delayMillis, and updateScreen (with >2 per-frame spin throttle so u_scr!=785)
+          # 6. Patch getMillis, delayMillis, and updateScreen (with >2 per-frame spin throttle)
           ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); void leapster_telem_update_screen(void); }\n'
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -191,7 +186,7 @@ jobs:
                       t, mod = t[:si] + nfn + t[ei:], True
                   if mod: open(fp, "w").write(ext + t)
 
-          # 7. Clean V14 audio_run + 4096 buffer + pause g_stall_us on clamped load stalls (fixes Lion King cut words!)
+          # 7. V14 audio_run + 4096 buf + pause g_stall_us on flash load stalls + block accelerometer axis jitter in leap_in_cb
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 4096;", ct, count=1)
@@ -244,9 +239,7 @@ jobs:
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
           static void leap_add_stall(uint32 dropped_samples, uint16 sr) {
-              uint32 r = sr ? sr : 44100;
-              uint64_t u = leap_us();
-              if (!g_t0) g_t0 = u;
+              uint32 r = sr ? sr : 44100; uint64_t u = leap_us(); if (!g_t0) g_t0 = u;
               uint64_t add_u = ((uint64_t)dropped_samples * 1000000ULL) / r;
               if (g_t0 + g_stall_us + add_u < u) g_stall_us += add_u;
           }
@@ -255,7 +248,7 @@ jobs:
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
           extern "C" void leapster_telem_update_screen(void) { g_uscr++; g_uscr_f++; if (g_uscr_f > 2 && g_dc == 0) usleep(2000); }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, int gf16, int hev) { g_pal_logs = 0; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x gf16=%d hev=%d\n", fn ? fn : "", ok, w, h, flags, gf16, hev); fflush(g_tfp); } }
-          extern "C" void leapster_telem_pal8(int wiz, int tr, int used, int fixed, int sv, int sc) { if (g_pal_logs < 4) { g_pal_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[PAL8] wiz=%d tr=%d used=%d fixed=%d vRGB=0x%06x cRGB=0x%06x\n", wiz, tr, used, fixed, sv, sc); fflush(g_tfp); } } }
+          extern "C" void leapster_telem_pal8(int wiz, int slot, int tr, int used, int fixed, int mv, int sv, int sc) { if (g_pal_logs < 4) { g_pal_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[PAL8] wiz=%d slot=%d tr=%d used=%d fixed=%d maxV=%d vRGB=0x%06x cRGB=0x%06x\n", wiz, slot, tr, used, fixed, mv, sv, sc); fflush(g_tfp); } } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) { if (d) g_af += (uint32_t)f; return g_orig_aud ? g_orig_aud(d, f) : f; }
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
@@ -305,10 +298,16 @@ jobs:
               if (g_click == 0) { g_rp_out = 0; if (g_tch || dn) g_click = 1; } else if (g_click == 1) { g_rp_out = 1; g_click = 2; } else { if (g_tch) g_rp_out = 1; else { g_rp_out = 0; g_click = 0; } }
           }
           static int16_t leap_in_cb(unsigned p, unsigned d, unsigned idx, unsigned id) {
-              if ((d & 0xff) == RETRO_DEVICE_POINTER && p == 0 && idx == 0 && g_ever) {
+              unsigned dev = d & 0xff;
+              if (dev == RETRO_DEVICE_POINTER && p == 0 && idx == 0 && g_ever) {
                   if (id == RETRO_DEVICE_ID_POINTER_X) return g_rx_out;
                   if (id == RETRO_DEVICE_ID_POINTER_Y) return g_ry_out;
                   if (id == RETRO_DEVICE_ID_POINTER_PRESSED) return g_rp_out;
+              }
+              if (dev == RETRO_DEVICE_ANALOG || dev == RETRO_DEVICE_MOUSE) return 0;
+              if (dev == RETRO_DEVICE_JOYPAD) {
+                  if (id == RETRO_DEVICE_ID_JOYPAD_UP || id == RETRO_DEVICE_ID_JOYPAD_DOWN || id == RETRO_DEVICE_ID_JOYPAD_LEFT || id == RETRO_DEVICE_ID_JOYPAD_RIGHT ||
+                      id == RETRO_DEVICE_ID_JOYPAD_L2 || id == RETRO_DEVICE_ID_JOYPAD_R2 || id == RETRO_DEVICE_ID_JOYPAD_L3 || id == RETRO_DEVICE_ID_JOYPAD_R3) return 0;
               }
               return g_orig_in ? g_orig_in(p, d, idx, id) : 0;
           }
@@ -336,7 +335,7 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. Safe IEEE-compliant Cortex-A9 flags (no -ffast-math so palette float math stays exact; --wrap keeps GLIBC<=2.17)
+          # 8. Safe IEEE-compliant Cortex-A9 flags (--wrap keeps GLIBC<=2.17)
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
