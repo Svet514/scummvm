@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V19 (Cortex-A9 O3 + WIZ Sync + AKOS8 Probe)
+name: Build ScummVM Libretro Core V20 (Safe VFPv3-D16 O3 + AKOS98 Shadow & WIZ Fix)
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump second half of akos.cpp & detection entry
+          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump smk_decoder.cpp & gfx_primitives_he.cpp
           for name in ["lite_engines.list", "engines.lite"]:
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
                   f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
@@ -32,15 +32,10 @@ jobs:
               mtxt = open(ms_cfg, "r").read()
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
 
-          with open("../upstream_v19.txt", "w") as df:
-              if os.path.exists("engines/scumm/akos.cpp"):
-                  df.write("\n=== akos.cpp (part 2) ===\n" + open("engines/scumm/akos.cpp", errors="ignore").read()[11500:42000])
-              for root, _, files in os.walk("engines/scumm"):
-                  for fn in files:
-                      if "detection" in fn and fn.endswith((".h", ".cpp")):
-                          dt = open(os.path.join(root, fn), errors="ignore").read()
-                          for m in re.finditer(r".{0,200}birthday.{0,300}", dt, flags=re.I | re.S):
-                              df.write(f"\n=== {fn} ===\n" + m.group(0) + "\n")
+          with open("../upstream_v20.txt", "w") as df:
+              for p in ["video/smk_decoder.cpp", "engines/scumm/he/gfx_primitives_he.cpp"]:
+                  if os.path.exists(p):
+                      df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read()[:28000])
 
           # 2. Generic detection unlock + auto-accept unsupported game warning (V14)
           adv = "engines/advancedDetector.cpp"
@@ -99,7 +94,7 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER cleanly in libretro options (V17)
+          # 4. Force RETRO_DEVICE_POINTER cleanly in libretro options (V17/V18)
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -111,11 +106,11 @@ jobs:
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Fix animation_he.cpp (WIZ RGBS sync + [SMK] hist), wiz_he.cpp (LE remapId fix), and akos.cpp (8-bit [AKOS8] probe)
+          # 5. Patch animation_he.cpp (WIZ RGBS sync + [SMK] hist), wiz_he.cpp (LE remapId fix), and akos.cpp (HE98 shadow layer fix!)
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
-              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags); void leapster_telem_smk(int fr, int fl, int tr, int nt, int p239, int drk, int brt); }', 1
+              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags); void leapster_telem_smk(int fr, int fl, int tr, int nt, int p239, int drk, int brt, int c1rgb); }', 1
           )
           anim_fix = """
               static bool s_dirIndexed = false;
@@ -133,24 +128,25 @@ jobs:
           smk_hist = """\t} else {
           \t\tint curFr = _video->getCurFrame();
           \t\tconst byte *vpal = _video->getPalette();
-          \t\tif (vpal && (curFr == 8 || curFr == 25) && w > 0 && h > 0) {
-          \t\t\tuint8 tr = src[0]; int nt = 0, p239 = 0, drk = 0, brt = 0;
+          \t\tif (vpal && (curFr == 1 || curFr == 10 || curFr == 25) && w > 0 && h > 0) {
+          \t\t\tuint8 tr = src[0]; int nt = 0, p239 = 0, drk = 0, brt = 0, c1rgb = -1;
           \t\t\tfor (uint32 n = 0, tot = w * h; n < tot; ++n) {
           \t\t\t\tuint8 c = src[n]; if (c == tr) continue;
           \t\t\t\t++nt; if (c == 239) ++p239;
-          \t\t\t\tif ((int)vpal[c * 3] + (int)vpal[c * 3 + 1] + (int)vpal[c * 3 + 2] < 60) ++drk; else ++brt;
+          \t\t\t\tint r = vpal[c * 3], g = vpal[c * 3 + 1], b = vpal[c * 3 + 2];
+          \t\t\t\tif (r + g + b < 60) ++drk; else { ++brt; if (c1rgb < 0) c1rgb = (r << 16) | (g << 8) | b; }
           \t\t\t}
-          \t\t\tleapster_telem_smk(curFr, _flags, (int)tr, nt, p239, drk, brt);
+          \t\t\tleapster_telem_smk(curFr, _flags, (int)tr, nt, p239, drk, brt, c1rgb < 0 ? 0 : c1rgb);
           \t\t}
           \t\tdst += y * pitch + x;"""
           anim_t, n_sh = re.subn(r"\t\}\s*else\s*\{\s*\n\s*dst\s*\+=\s*y\s*\*\s*pitch\s*\+\s*x\s*;", lambda _: smk_hist, anim_t, count=1)
           rgbs_sync = """copyFrameToBuffer(dst, kDstResource, 0, 0, _vm->_screenWidth * _vm->_bytesPerPixel);
           \t\tconst byte *vpal = _video->getPalette();
           \t\tuint8 *rgbs = _vm->findWrappedBlock(MKTAG('R','G','B','S'), dstPtr, 0, 0);
-          \t\tif (vpal && rgbs && memcmp(rgbs, vpal, 768) != 0) {
+          \t\tif (vpal && rgbs && _vm->getResourceDataSize(rgbs) >= 768 && memcmp(rgbs, vpal, 768) != 0) {
           \t\t\tmemcpy(rgbs, vpal, 768);
           \t\t\tuint8 *rmap = _vm->findWrappedBlock(MKTAG('R','M','A','P'), dstPtr, 0, 0);
-          \t\t\tif (rmap) WRITE_LE_UINT32(rmap, 0xFFFFFFFF);
+          \t\t\tif (rmap && _vm->getResourceDataSize(rmap) >= 4) WRITE_LE_UINT32(rmap, 0xFFFFFFFF);
           \t\t}"""
           anim_t, n_rg = re.subn(r"copyFrameToBuffer\(dst,\s*kDstResource,\s*0,\s*0,\s*_vm->_screenWidth\s*\*\s*_vm->_bytesPerPixel\);", lambda _: rgbs_sync, anim_t, count=1)
           assert n_al == 1 and n_sh == 1 and n_rg == 1, f"animation_he mismatch: {n_al},{n_sh},{n_rg}"
@@ -159,19 +155,24 @@ jobs:
           wiz_p = "engines/scumm/he/wiz_he.cpp"
           wiz_t = open(wiz_p, "r").read().replace("#ifdef ENABLE_HE", '#ifdef ENABLE_HE\nextern "C" void leapster_telem_wiz(int glob, int comp, int flags, int shd);', 1)
           wiz_t, n_we = re.subn(r"if\s*\(\s*remapId\s*!=\s*_vm->_paletteChangedCounter\s*\)\s*\{", "if ((int)READ_LE_UINT32(remapPtr + _vm->_resourceHeaderSize) != _vm->_paletteChangedCounter) {", wiz_t, count=1)
-          wiz_t, n_wt = re.subn(r"(// Decompress the image\.\.\.)", r"if (globNum == 82 || (srcWidth >= 120 && srcHeight >= 120)) leapster_telem_wiz(globNum, srcComp, flags, shadowImage);\n\t\1", wiz_t, count=1)
+          wiz_t, n_wt = re.subn(r"(// Decompress the image\.\.\.)", r"if (globNum == 82 || shadowImage != 0) leapster_telem_wiz(globNum, srcComp, flags, shadowImage);\n\t\1", wiz_t, count=1)
           assert n_we == 1 and n_wt == 1, f"wiz_he mismatch: {n_we},{n_wt}"
           open(wiz_p, "w").write(wiz_t)
 
           akos_p = "engines/scumm/akos.cpp"
-          akos_t = open(akos_p, "r").read().replace("namespace Scumm {", 'extern "C" void leapster_telem_akos8(int sz, int pnum, int cod, int has_rgbs, int has_xmap, int np0, int np1, int ak1, int p1);\nnamespace Scumm {', 1)
+          akos_t = open(akos_p, "r").read().replace("namespace Scumm {", 'extern "C" void leapster_telem_akos8(int sz, int pnum, int cod, int rg, int xm, int np0, int p1);\nnamespace Scumm {', 1)
+          akos_t, n_ash = re.subn(
+              r"if\s*\(\s*_vm->_game\.heversion\s*>=\s*99\s*\)\s*\{\s*\n(\s*_shadowMode\s*=\s*0\s*;)",
+              r"if (_vm->_game.heversion >= 99 || (_vm->_game.heversion >= 90 && useConditionalTable && _akct)) {\n\1",
+              akos_t, count=1
+          )
           akos_probe = "if (_vm->_game.heversion == 70) {"
-          akos_rep = "leapster_telem_akos8((int)size, (int)_paletteNum, (int)_codec, _rgbs != nullptr, _xmap != nullptr, (int)new_palette[0], size > 1 ? (int)new_palette[1] : -1, size > 1 ? (int)_akpl[1] : -1, size > 1 ? (int)_palette[1] : -1);\n\tif (_vm->_game.heversion == 70) {"
-          assert akos_probe in akos_t, "Missing heversion == 70 anchor in akos.cpp"
+          akos_rep = "leapster_telem_akos8((int)size, (int)_paletteNum, (int)_codec, _rgbs != nullptr, _xmap != nullptr, (int)new_palette[0], size > 1 ? (int)_palette[1] : -1);\n\tif (_vm->_game.heversion == 70) {"
+          assert n_ash == 1 and akos_probe in akos_t, f"akos.cpp mismatch: {n_ash}"
           open(akos_p, "w").write(akos_t.replace(akos_probe, akos_rep, 1))
 
-          # 6. Clean getMillis, delayMillis (sched_yield for sub-jiffy waits), and updateScreen (V17-clean signature!)
-          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_wait_step(unsigned int rem_ms); void leapster_telem_delay(unsigned int r, unsigned int a); void leapster_telem_update_screen(void); }\n'
+          # 6. Proven V18 getMillis, delayMillis (usleep(500) safe for RT kernel), and updateScreen
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); void leapster_telem_update_screen(void); }\n'
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
                   if not fn.endswith(".cpp"): continue
@@ -189,7 +190,7 @@ jobs:
                           if dp == 0: ei = i + 1; break
                       mc = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", t[bi:ei])
                       chk = mc.group(0) if mc else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
-                      nfn = f"void OSystem_libretro::delayMillis(uint {p}) {{\n\tuint32 st = getMillis(), el = 0;\n\tif ({p} == 0) {{ {chk}; return; }}\n\twhile (el < {p}) {{ if (!{chk}) leapster_wait_step({p} - el); el = getMillis() - st; }}\n\tleapster_telem_delay({p}, el);\n}}"
+                      nfn = f"void OSystem_libretro::delayMillis(uint {p}) {{\n\tuint32 st = getMillis(), el = 0;\n\tif ({p} == 0) {{ {chk}; return; }}\n\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n\tleapster_telem_delay({p}, el);\n}}"
                       t, mod = t[:si] + nfn + t[ei:], True
                   if mod: open(fp, "w").write(ext + t)
 
@@ -209,7 +210,6 @@ jobs:
           hook = r"""
           #include <fcntl.h>
           #include <unistd.h>
-          #include <sched.h>
           #include <stdio.h>
           #include <string.h>
           #include <stdint.h>
@@ -242,7 +242,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V19 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V20 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -252,13 +252,13 @@ jobs:
               if (g_t0 + g_stall_us + add_u < u) g_stall_us += add_u;
           }
           extern "C" unsigned int leapster_hw_get_millis(void) { uint64_t u = leap_us(); if (!g_t0) g_t0 = u; uint64_t adj = g_t0 + g_stall_us; return (u > adj) ? (unsigned int)((u - adj) / 1000ULL) : 0U; }
-          extern "C" void leapster_wait_step(unsigned int rem_ms) { if (rem_ms >= 15) usleep(1000); else sched_yield(); }
+          extern "C" void leapster_sleep_us(unsigned int us) { usleep((useconds_t)us); }
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
-          extern "C" void leapster_telem_update_screen(void) { g_uscr++; g_uscr_f++; if (g_uscr_f > 2 && g_dc == 0) usleep(1000); }
+          extern "C" void leapster_telem_update_screen(void) { g_uscr++; g_uscr_f++; if (g_runs > 0 && g_uscr_f > 3 && g_dc == 0) usleep(1000); }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { g_wz_logs = 0; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
-          extern "C" void leapster_telem_smk(int fr, int fl, int tr, int nt, int p239, int drk, int brt) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[SMK] fr=%d flags=0x%x tr=%d nonTrans=%d idx239=%d dark=%d bright=%d\n", fr, fl, tr, nt, p239, drk, brt); fflush(g_tfp); } }
-          extern "C" void leapster_telem_wiz(int g, int cp, int fl, int sh) { if (g_wz_logs < 4) { g_wz_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[WIZ] id=%d comp=%d flags=0x%x shd=%d\n", g, cp, fl, sh); fflush(g_tfp); } } }
-          extern "C" void leapster_telem_akos8(int sz, int pn, int cd, int rg, int xm, int np0, int np1, int ak1, int p1) { if (g_ak_logs < 20 && (sz >= 32 || rg || xm || pn)) { g_ak_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[AKOS8] sz=%d pNum=%d cod=%d rgbs=%d xmap=%d np0=%d np1=%d ak1=%d p1=%d\n", sz, pn, cd, rg, xm, np0, np1, ak1, p1); fflush(g_tfp); } } }
+          extern "C" void leapster_telem_smk(int fr, int fl, int tr, int nt, int p239, int drk, int brt, int c1) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[SMK] fr=%d flags=0x%x tr=%d nonTrans=%d idx239=%d dark=%d bright=%d sampleRGB=0x%06x\n", fr, fl, tr, nt, p239, drk, brt, c1); fflush(g_tfp); } }
+          extern "C" void leapster_telem_wiz(int g, int cp, int fl, int sh) { if (g_wz_logs < 5) { g_wz_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[WIZ] id=%d comp=%d flags=0x%x shd=%d\n", g, cp, fl, sh); fflush(g_tfp); } } }
+          extern "C" void leapster_telem_akos8(int sz, int pn, int cd, int rg, int xm, int np0, int p1) { if (g_ak_logs < 20 && (sz >= 32 || rg || xm || pn)) { g_ak_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[AKOS8] sz=%d pNum=%d cod=%d rgbs=%d xmap=%d np0=%d p1=%d\n", sz, pn, cd, rg, xm, np0, p1); fflush(g_tfp); } } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) { if (d) g_af += (uint32_t)f; return g_orig_aud ? g_orig_aud(d, f) : f; }
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
@@ -345,10 +345,10 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. Full Cortex-A9 hardware unaligned access + 32-reg VFPv3 + -O3 + -fsigned-char (--wrap keeps GLIBC<=2.17)
+          # 8. Proven V17/V18 Cortex-A9 VFPv3-D16 flags (fixes V19 SIGILL crash on core open!)
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
-          opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3 -mfloat-abi=softfp -marm -munaligned-access -fsigned-char -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
+          opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -fsigned-char -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
           ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
           open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common"))
@@ -363,16 +363,16 @@ jobs:
             make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_VORBIS=0 USE_TREMOR=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
             echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
-            cat /work/upstream_v19.txt >> /work/build_report.txt || true
+            cat /work/upstream_v20.txt >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V19
+      - name: Upload ScummVM Libretro Core V20
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v19
+          name: scummvm_libretro_leapster_v20
           path: |
             scummvm_libretro.so
             build_scummvm.log
