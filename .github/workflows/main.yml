@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V24 (40ms ALSA-Matched Buffer + Monotonic Stall Sync)
+name: Build ScummVM Libretro Core V25 (70ms Proven Audio + MediaStation Drain + 25Hz Pacer)
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump mediastation sound sources for build_report.txt
+          # 1. Enable scumm, scumm_7_8, he, and mediastation
           for name in ["lite_engines.list", "engines.lite"]:
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
                   f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
@@ -31,11 +31,6 @@ jobs:
           if os.path.exists(ms_cfg):
               mtxt = open(ms_cfg, "r").read()
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
-
-          with open("../upstream_v24.txt", "w") as df:
-              for p in ["engines/mediastation/audio.cpp", "engines/mediastation/actors/sound.cpp"]:
-                  if os.path.exists(p):
-                      df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read()[:20000])
 
           # 2. Generic detection unlock + auto-accept unsupported game warning (V14)
           adv = "engines/advancedDetector.cpp"
@@ -106,7 +101,7 @@ jobs:
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Clean V14 animation_he.cpp path fallback
+          # 5a. Clean V14 animation_he.cpp path fallback
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
@@ -128,7 +123,44 @@ jobs:
           assert n_al == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 6. Direct 1:1 stylus click + token-bucket 22Hz updateScreen pacer + raw-clock delayMillis
+          # 5b. MediaStation AudioSequence 240ms ALSA hardware buffer drain guard (fixes clipped final words in Lion King!)
+          ms_aud_p = "engines/mediastation/audio.cpp"
+          ms_aud_t = open(ms_aud_p, "r").read()
+          ms_helper = """extern "C" unsigned int leapster_raw_millis(void);
+          namespace MediaStation {
+          static struct { const void *seq; unsigned int t0; } s_leapDrain[8];
+          static void leapDrainClear(const void *s) {
+          \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == s) { s_leapDrain[i].seq = nullptr; s_leapDrain[i].t0 = 0; }
+          }
+          static bool leapDrainReady(const void *s, unsigned int waitMs) {
+          \tunsigned int now = leapster_raw_millis();
+          \tif (!now) now = 1;
+          \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == s) return (now - s_leapDrain[i].t0) >= waitMs;
+          \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == nullptr) { s_leapDrain[i].seq = s; s_leapDrain[i].t0 = now; return false; }
+          \treturn true;
+          }
+          """
+          assert "namespace MediaStation {" in ms_aud_t, "Missing MediaStation namespace in audio.cpp"
+          ms_aud_t = ms_aud_t.replace("namespace MediaStation {", ms_helper, 1)
+          ms_aud_t, n_ms1 = re.subn(r"(void\s+AudioSequence::start\s*\(\s*\)\s*\{)", r"\1\n\tleapDrainClear(this);", ms_aud_t, count=1)
+          ms_aud_t, n_ms2 = re.subn(r"(void\s+AudioSequence::stop\s*\(\s*\)\s*\{)", r"\1\n\tleapDrainClear(this);", ms_aud_t, count=1)
+          ms_srv_rep = """void AudioSequence::service() {
+          \tbool soundActuallyPlaying = g_engine->_mixer->isSoundHandleActive(_handle);
+          \tif (soundActuallyPlaying) {
+          \t\tleapDrainClear(this);
+          \t} else if (_state == kSoundPlayStatePlaying && leapDrainReady(this, 240)) {
+          \t\tleapDrainClear(this);
+          \t\tmakeSoundIdle(kSoundStopForEnd);
+          \t}
+          }"""
+          ms_aud_t, n_ms3 = re.subn(
+              r"void\s+AudioSequence::service\s*\(\s*\)\s*\{\s*bool\s+soundActuallyPlaying\s*=\s*g_engine->_mixer->isSoundHandleActive\(_handle\);\s*if\s*\(_state\s*==\s*kSoundPlayStatePlaying\s*&&\s*!soundActuallyPlaying\)\s*\{\s*makeSoundIdle\(kSoundStopForEnd\);\s*\}\s*\}",
+              lambda _: ms_srv_rep, ms_aud_t, count=1
+          )
+          assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1, f"MediaStation audio patch mismatch: {n_ms1},{n_ms2},{n_ms3}"
+          open(ms_aud_p, "w").write(ms_aud_t)
+
+          # 6. Direct 1:1 stylus click + token-bucket 25Hz (40ms) updateScreen pacer + raw-clock delayMillis
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
               "void OSystem_libretro::processInputs(void) {",
@@ -217,16 +249,16 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. 1764-frame (40ms = 1 ALSA period = 25Hz floor) buffer + monotonic stall sync + latency block + Steve de-interlacer
+          # 7. Proven 3087-frame (70ms = 1.75 ALSA periods) buffer + monotonic load-stall sync + 1024-slice delivery + Steve de-interlacer
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 1764;", ct, count=1)
+          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 3087;", ct, count=1)
           ct, n_clamp = re.subn(
               r"if\s*\(\s*samples_to_read\s*>\s*samples_buffer_size\s*\)\s*samples_to_read\s*=\s*samples_buffer_size\s*;",
               "if (samples_to_read > samples_buffer_size) { leap_add_stall(samples_to_read - samples_buffer_size, sample_rate); samples_to_read = samples_buffer_size; }",
               ct, count=1
           )
-          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 1764 ? 1764 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
+          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { memset(audio_sample_buffer, 0, samples_to_read * 2 * sizeof(int16)); samples_produced = samples_to_read; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
           ct, n_arun = re.subn(r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}", lambda _: arun_rep, ct, count=1, flags=re.S)
           assert n_abuf == 1 and n_clamp == 1 and n_arun == 1, f"Audio patch mismatch: {n_abuf},{n_clamp},{n_arun}"
 
@@ -269,15 +301,12 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V24 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | stl_ms | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V25 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | stl_ms | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
           static bool leap_env_cb(unsigned cmd, void *data) {
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) return true;
-          #ifdef RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY
-              if (cmd == RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY) return true;
-          #endif
               return g_orig_env ? g_orig_env(cmd, data) : false;
           }
           static void leap_add_stall(uint32 dropped_samples, uint16 sr) {
@@ -313,11 +342,11 @@ jobs:
               if (g_total_runs < 5) return 0;
               uint64_t u = leap_us();
               if (!g_bucket_u) g_bucket_u = u;
-              if (u > g_bucket_u + 90000ULL) g_bucket_u = u - 90000ULL;
-              g_bucket_u += 45000ULL;
+              if (u > g_bucket_u + 80000ULL) g_bucket_u = u - 80000ULL;
+              g_bucket_u += 40000ULL;
               if (g_bucket_u > u) {
                   unsigned int w = (unsigned int)((g_bucket_u - u + 999ULL) / 1000ULL);
-                  return w > 45 ? 45 : w;
+                  return w > 40 ? 40 : w;
               }
               return 0;
           }
@@ -328,7 +357,7 @@ jobs:
               size_t sent = 0, rem = f;
               const int16_t *p = d;
               while (rem > 0) {
-                  size_t ch = rem > 882 ? 882 : rem;
+                  size_t ch = rem > 1024 ? 1024 : rem;
                   sent += g_orig_aud(p, ch);
                   p += ch * 2;
                   rem -= ch;
@@ -387,7 +416,7 @@ jobs:
           #define LNB(x) ((((x) - 1) / LBPL) + 1)
           #define LTB(b, a) ((a[(b) / LBPL] >> ((b) % LBPL)) & 1)
           static void leap_map_xy(int rx, int ry, int *ox, int *oy) {
-              int sx = g_pcal_on ? (int)((g_pcal[0] * (long)rx + g_pcal[1] * (long)rx * 0 + g_pcal[1] * (long)ry + g_pcal[2]) / g_pcal[6]) : ((g_mxx > g_mnx) ? ((rx - g_mnx) * 320) / (g_mxx - g_mnx) : rx);
+              int sx = g_pcal_on ? (int)((g_pcal[0] * (long)rx + g_pcal[1] * (long)ry + g_pcal[2]) / g_pcal[6]) : ((g_mxx > g_mnx) ? ((rx - g_mnx) * 320) / (g_mxx - g_mnx) : rx);
               int sy = g_pcal_on ? (int)((g_pcal[3] * (long)rx + g_pcal[4] * (long)ry + g_pcal[5]) / g_pcal[6]) : ((g_mxy > g_mny) ? ((ry - g_mny) * 240) / (g_mxy - g_mny) : ry);
               *ox = sx < 0 ? 0 : (sx > 319 ? 319 : sx);
               *oy = sy < 0 ? 0 : (sy > 239 ? 239 : sy);
@@ -478,7 +507,7 @@ jobs:
                   g_sec++;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL);
                   uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 44100U, sm = (uint32_t)(g_stall_win_us / 1000ULL);
-                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %6u | %3ux%-3u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, sm, g_vw, g_vh, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
+                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %6u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, sm, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
                   g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = 0; g_stall_win_us = 0;
               }
           }
@@ -518,15 +547,14 @@ jobs:
             $STRIP -s scummvm_libretro.so
             echo "=== BINARY SIZE ===" >> /work/build_report.txt
             ls -lh scummvm_libretro.so >> /work/build_report.txt
-            cat /work/upstream_v24.txt >> /work/build_report.txt || true
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V24
+      - name: Upload ScummVM Libretro Core V25
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v24
+          name: scummvm_libretro_leapster_v25
           path: |
             scummvm_libretro.so
             build_scummvm.log
