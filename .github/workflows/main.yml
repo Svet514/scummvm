@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V19 (WIZ RGBS Sync + SMK Histogram + Cortex-A9 O3)
+name: Build ScummVM Libretro Core V19 (Cortex-A9 O3 + WIZ Sync + AKOS8 Probe)
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump smk_decoder.cpp
+          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump second half of akos.cpp & detection entry
           for name in ["lite_engines.list", "engines.lite"]:
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
                   f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
@@ -33,9 +33,14 @@ jobs:
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
 
           with open("../upstream_v19.txt", "w") as df:
-              for p in ["video/smk_decoder.cpp", "engines/scumm/palette.cpp"]:
-                  if os.path.exists(p):
-                      df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read()[:32000])
+              if os.path.exists("engines/scumm/akos.cpp"):
+                  df.write("\n=== akos.cpp (part 2) ===\n" + open("engines/scumm/akos.cpp", errors="ignore").read()[11500:42000])
+              for root, _, files in os.walk("engines/scumm"):
+                  for fn in files:
+                      if "detection" in fn and fn.endswith((".h", ".cpp")):
+                          dt = open(os.path.join(root, fn), errors="ignore").read()
+                          for m in re.finditer(r".{0,200}birthday.{0,300}", dt, flags=re.I | re.S):
+                              df.write(f"\n=== {fn} ===\n" + m.group(0) + "\n")
 
           # 2. Generic detection unlock + auto-accept unsupported game warning (V14)
           adv = "engines/advancedDetector.cpp"
@@ -106,7 +111,7 @@ jobs:
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5. Fix animation_he.cpp (sync Smacker palette into WIZ RGBS + [SMK] histogram) & wiz_he.cpp (BE/LE remapId fix)
+          # 5. Fix animation_he.cpp (WIZ RGBS sync + [SMK] hist), wiz_he.cpp (LE remapId fix), and akos.cpp (8-bit [AKOS8] probe)
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
@@ -158,8 +163,15 @@ jobs:
           assert n_we == 1 and n_wt == 1, f"wiz_he mismatch: {n_we},{n_wt}"
           open(wiz_p, "w").write(wiz_t)
 
-          # 6. Clean getMillis, delayMillis (sched_yield for sub-jiffy waits), and updateScreen (yield on >2 redundant blits/frame)
-          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_wait_step(unsigned int rem_ms); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_telem_update_screen(void); }\n'
+          akos_p = "engines/scumm/akos.cpp"
+          akos_t = open(akos_p, "r").read().replace("namespace Scumm {", 'extern "C" void leapster_telem_akos8(int sz, int pnum, int cod, int has_rgbs, int has_xmap, int np0, int np1, int ak1, int p1);\nnamespace Scumm {', 1)
+          akos_probe = "if (_vm->_game.heversion == 70) {"
+          akos_rep = "leapster_telem_akos8((int)size, (int)_paletteNum, (int)_codec, _rgbs != nullptr, _xmap != nullptr, (int)new_palette[0], size > 1 ? (int)new_palette[1] : -1, size > 1 ? (int)_akpl[1] : -1, size > 1 ? (int)_palette[1] : -1);\n\tif (_vm->_game.heversion == 70) {"
+          assert akos_probe in akos_t, "Missing heversion == 70 anchor in akos.cpp"
+          open(akos_p, "w").write(akos_t.replace(akos_probe, akos_rep, 1))
+
+          # 6. Clean getMillis, delayMillis (sched_yield for sub-jiffy waits), and updateScreen (V17-clean signature!)
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_wait_step(unsigned int rem_ms); void leapster_telem_delay(unsigned int r, unsigned int a); void leapster_telem_update_screen(void); }\n'
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
                   if not fn.endswith(".cpp"): continue
@@ -168,7 +180,7 @@ jobs:
                   if "OSystem_libretro::getMillis" in t:
                       t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1); mod = mod or (n > 0)
                   if "::updateScreen" in t:
-                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 if (leapster_telem_update_screen() > 2) delayMillis(0);", t, count=1); mod = mod or (n > 0)
+                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 leapster_telem_update_screen();", t, count=1); mod = mod or (n > 0)
                   md = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", t)
                   if md:
                       p, si, bi, dp, ei = md.group(1), md.start(), md.end() - 1, 0, -1
@@ -215,7 +227,7 @@ jobs:
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
           static retro_video_refresh_t g_orig_vid = NULL;
-          static int g_ts_fd = -2, g_pcal_on = 0, g_click = 0, g_dbpp = 0, g_wz_logs = 0;
+          static int g_ts_fd = -2, g_pcal_on = 0, g_click = 0, g_dbpp = 0, g_wz_logs = 0, g_ak_logs = 0;
           static char g_ts_nm[64] = "none";
           static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = 160, g_lsy = 120, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
@@ -242,10 +254,11 @@ jobs:
           extern "C" unsigned int leapster_hw_get_millis(void) { uint64_t u = leap_us(); if (!g_t0) g_t0 = u; uint64_t adj = g_t0 + g_stall_us; return (u > adj) ? (unsigned int)((u - adj) / 1000ULL) : 0U; }
           extern "C" void leapster_wait_step(unsigned int rem_ms) { if (rem_ms >= 15) usleep(1000); else sched_yield(); }
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
-          extern "C" unsigned int leapster_telem_update_screen(void) { g_uscr++; return ++g_uscr_f; }
+          extern "C" void leapster_telem_update_screen(void) { g_uscr++; g_uscr_f++; if (g_uscr_f > 2 && g_dc == 0) usleep(1000); }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { g_wz_logs = 0; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
           extern "C" void leapster_telem_smk(int fr, int fl, int tr, int nt, int p239, int drk, int brt) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[SMK] fr=%d flags=0x%x tr=%d nonTrans=%d idx239=%d dark=%d bright=%d\n", fr, fl, tr, nt, p239, drk, brt); fflush(g_tfp); } }
           extern "C" void leapster_telem_wiz(int g, int cp, int fl, int sh) { if (g_wz_logs < 4) { g_wz_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[WIZ] id=%d comp=%d flags=0x%x shd=%d\n", g, cp, fl, sh); fflush(g_tfp); } } }
+          extern "C" void leapster_telem_akos8(int sz, int pn, int cd, int rg, int xm, int np0, int np1, int ak1, int p1) { if (g_ak_logs < 20 && (sz >= 32 || rg || xm || pn)) { g_ak_logs++; leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[AKOS8] sz=%d pNum=%d cod=%d rgbs=%d xmap=%d np0=%d np1=%d ak1=%d p1=%d\n", sz, pn, cd, rg, xm, np0, np1, ak1, p1); fflush(g_tfp); } } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) { if (d) g_af += (uint32_t)f; return g_orig_aud ? g_orig_aud(d, f) : f; }
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
