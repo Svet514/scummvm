@@ -123,7 +123,7 @@ jobs:
           assert n_al == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 6. Patch getMillis, delayMillis, 25Hz updateScreen pacer, and direct 1:1 stylus click in libretro-os-inputs.cpp
+          # 6. Direct 1:1 stylus click in libretro-os-inputs.cpp + pure extern "C" 25Hz updateScreen pacer (no forbidden.h conflict!)
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read()
           s_anc = "if (retro_setting_get_pointer_device() == RETRO_DEVICE_POINTER) {"
@@ -150,6 +150,7 @@ jobs:
           \t\t\tpendingDown = true;
           \t\t} else if (pendingDown) {
           \t\t\tpendingDown = false;
+          \t\t\tif (p_press && (px != lastX || py != lastY)) { _mouseX = lastX = px; _mouseY = lastY = py; setMousePosition(_mouseX, _mouseY); }
           \t\t\tCommon::Event ev; ev.type = eventID[0][0];
           \t\t\tev.mouse.x = _mouseX; ev.mouse.y = _mouseY;
           \t\t\t_events.push_back(ev); leftDown = true;
@@ -172,16 +173,19 @@ jobs:
           \t"""
           open(inp_p, "w").write(inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
 
-          ext = '#include "common/system.h"\nextern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); }\n'
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); }\n'
+          got_gm = got_us = got_dm = False
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
                   if not fn.endswith(".cpp"): continue
                   fp = os.path.join(root, fn)
                   t, mod = open(fp, errors="ignore").read(), False
                   if "OSystem_libretro::getMillis" in t:
-                      t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1); mod = mod or (n > 0)
+                      t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1)
+                      mod = mod or (n > 0); got_gm = got_gm or (n > 0)
                   if "::updateScreen" in t:
-                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0 && g_system) g_system->delayMillis(_lw);", t, count=1); mod = mod or (n > 0)
+                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw);", t, count=1)
+                      mod = mod or (n > 0); got_us = got_us or (n > 0)
                   md = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", t)
                   if md:
                       p, si, bi, dp, ei = md.group(1), md.start(), md.end() - 1, 0, -1
@@ -190,11 +194,20 @@ jobs:
                           if dp == 0: ei = i + 1; break
                       mc = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", t[bi:ei])
                       chk = mc.group(0) if mc else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
-                      nfn = f"void OSystem_libretro::delayMillis(uint {p}) {{\n\tuint32 st = getMillis(), el = 0;\n\tif ({p} == 0) {{ {chk}; return; }}\n\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n\tleapster_telem_delay({p}, el);\n}}"
-                      t, mod = t[:si] + nfn + t[ei:], True
+                      nfn = (
+                          f'extern "C" void leapster_os_delay(unsigned int ms) {{ if (g_system) g_system->delayMillis(ms); }}\n'
+                          f"void OSystem_libretro::delayMillis(uint {p}) {{\n"
+                          f"\tuint32 st = getMillis(), el = 0;\n"
+                          f"\tif ({p} == 0) {{ {chk}; return; }}\n"
+                          f"\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n"
+                          f"\tleapster_telem_delay({p}, el);\n"
+                          f"}}"
+                      )
+                      t, mod, got_dm = t[:si] + nfn + t[ei:], True, True
                   if mod: open(fp, "w").write(ext + t)
+          assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. 3528-frame mixer cap + 1024-frame chunked audio delivery (prevents RetroArch >2048 truncation!) + V21 Steve downscaler + touch debounce
+          # 7. 3528-frame mixer cap + 1024-frame chunked audio delivery + fast 2-row Steve de-interlacer + touch debounce
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 3528;", ct, count=1)
@@ -263,6 +276,7 @@ jobs:
               const uint64_t min_gap = 40000ULL;
               if (g_last_uscr_u && u < g_last_uscr_u + min_gap) {
                   unsigned int w = (unsigned int)((g_last_uscr_u + min_gap - u) / 1000ULL);
+                  if (w > 40) w = 40;
                   g_last_uscr_u = u + (uint64_t)w * 1000ULL;
                   return w;
               }
@@ -296,20 +310,15 @@ jobs:
                           size_t row = p >> 2; const uint32_t *base = (const uint32_t *)d; uint32_t *o = g_d32;
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
                               const uint32_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
-                              const uint32_t *sm1 = (y > 0) ? (s0 - row) : s1, *sm2 = (y > 0) ? (s0 - (row << 1)) : s0;
-                              const uint32_t *s2 = (y < 239) ? (s1 + row) : s0, *s3 = (y < 239) ? (s2 + row) : s1;
                               for (unsigned x = 0; x < 320; ++x) {
                                   unsigned x2 = x << 1;
                                   uint32_t p00 = s0[x2], p01 = s0[x2 + 1], p10 = s1[x2], p11 = s1[x2 + 1];
                                   if (p00 == p10 && p00 == p01 && p00 == p11) { o[x] = p00; continue; }
-                                  bool d00 = LDK32(p00), d01 = LDK32(p01), d10 = LDK32(p10), d11 = LDK32(p11);
-                                  if (d00 && d01 && (!d10 || !d11) && ((LDK32(s2[x2]) && LDK32(s2[x2 + 1])) || (y > 0 && LDK32(sm2[x2]) && LDK32(sm2[x2 + 1]))))
-                                      o[x] = (!d10 && !d11) ? LAVG32(p10, p11) : (!d10 ? p10 : p11);
-                                  else if (d10 && d11 && (!d00 || !d01) && ((LDK32(sm1[x2]) && LDK32(sm1[x2 + 1])) || (y < 239 && LDK32(s3[x2]) && LDK32(s3[x2 + 1]))))
-                                      o[x] = (!d00 && !d01) ? LAVG32(p00, p01) : (!d00 ? p00 : p01);
-                                  else if (d00 && d11 && !d01 && !d10) o[x] = LAVG32(p01, p10);
-                                  else if (d01 && d10 && !d00 && !d11) o[x] = LAVG32(p00, p11);
-                                  else o[x] = LAVG32(LAVG32(p00, p01), LAVG32(p10, p11));
+                                  uint32_t a0 = (p00 == p01) ? p00 : LAVG32(p00, p01);
+                                  uint32_t a1 = (p10 == p11) ? p10 : LAVG32(p10, p11);
+                                  if (a0 == a1) { o[x] = a0; continue; }
+                                  bool dk0 = LDK32(p00) && LDK32(p01), dk1 = LDK32(p10) && LDK32(p11);
+                                  o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG32(a0, a1));
                               }
                           }
                           g_dbpp = 4;
@@ -317,20 +326,15 @@ jobs:
                           size_t row = p >> 1; const uint16_t *base = (const uint16_t *)d; uint16_t *o = g_d16;
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
                               const uint16_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
-                              const uint16_t *sm1 = (y > 0) ? (s0 - row) : s1, *sm2 = (y > 0) ? (s0 - (row << 1)) : s0;
-                              const uint16_t *s2 = (y < 239) ? (s1 + row) : s0, *s3 = (y < 239) ? (s2 + row) : s1;
                               for (unsigned x = 0; x < 320; ++x) {
                                   unsigned x2 = x << 1;
                                   uint16_t p00 = s0[x2], p01 = s0[x2 + 1], p10 = s1[x2], p11 = s1[x2 + 1];
                                   if (p00 == p10 && p00 == p01 && p00 == p11) { o[x] = p00; continue; }
-                                  bool d00 = LDK16(p00), d01 = LDK16(p01), d10 = LDK16(p10), d11 = LDK16(p11);
-                                  if (d00 && d01 && (!d10 || !d11) && ((LDK16(s2[x2]) && LDK16(s2[x2 + 1])) || (y > 0 && LDK16(sm2[x2]) && LDK16(sm2[x2 + 1]))))
-                                      o[x] = (!d10 && !d11) ? LAVG16(p10, p11) : (!d10 ? p10 : p11);
-                                  else if (d10 && d11 && (!d00 || !d01) && ((LDK16(sm1[x2]) && LDK16(sm1[x2 + 1])) || (y < 239 && LDK16(s3[x2]) && LDK16(s3[x2 + 1]))))
-                                      o[x] = (!d00 && !d01) ? LAVG16(p00, p01) : (!d00 ? p00 : p01);
-                                  else if (d00 && d11 && !d01 && !d10) o[x] = LAVG16(p01, p10);
-                                  else if (d01 && d10 && !d00 && !d11) o[x] = LAVG16(p00, p11);
-                                  else o[x] = LAVG16(LAVG16(p00, p01), LAVG16(p10, p11));
+                                  uint16_t a0 = (p00 == p01) ? p00 : LAVG16(p00, p01);
+                                  uint16_t a1 = (p10 == p11) ? p10 : LAVG16(p10, p11);
+                                  if (a0 == a1) { o[x] = a0; continue; }
+                                  bool dk0 = LDK16(p00) && LDK16(p01), dk1 = LDK16(p10) && LDK16(p11);
+                                  o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG16(a0, a1));
                               }
                           }
                           g_dbpp = 2;
