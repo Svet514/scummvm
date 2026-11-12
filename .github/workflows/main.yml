@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V23 (Monotonic Clock + Strict BTN_TOUCH + Fixed 20Hz Pacer)
+name: Build ScummVM Libretro Core V23 (Monotonic Clock + Strict BTN_TOUCH + Token-Bucket Pacer)
 
 on:
   push:
@@ -123,9 +123,13 @@ jobs:
           assert n_al == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 6. Direct 1:1 stylus click in libretro-os-inputs.cpp + non-resetting 20Hz updateScreen pacer
+          # 6. Direct 1:1 stylus click in libretro-os-inputs.cpp + token-bucket 22Hz updateScreen pacer
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
-          inp_t = open(inp_p, "r").read()
+          inp_t = open(inp_p, "r").read().replace(
+              "void OSystem_libretro::processInputs(void) {",
+              'extern "C" void leapster_telem_click(void);\nvoid OSystem_libretro::processInputs(void) {',
+              1
+          )
           s_anc = "if (retro_setting_get_pointer_device() == RETRO_DEVICE_POINTER) {"
           e_anc = "} else if (retro_setting_get_pointer_device() == RETRO_DEVICE_MOUSE) {"
           assert s_anc in inp_t and e_anc in inp_t, "Missing pointer anchors in libretro-os-inputs.cpp"
@@ -172,9 +176,9 @@ jobs:
           \t\t\t}
           \t\t}
           \t"""
-          open(inp_p, "w").write('extern "C" void leapster_telem_click(void);\n' + inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
+          open(inp_p, "w").write(inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
 
-          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_pace_done(void); void leapster_os_delay(unsigned int ms); }\n'
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); }\n'
           got_gm = got_us = got_dm = False
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -185,7 +189,7 @@ jobs:
                       t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1)
                       mod = mod or (n > 0); got_gm = got_gm or (n > 0)
                   if "::updateScreen" in t:
-                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) { leapster_os_delay(_lw); leapster_pace_done(); }", t, count=1)
+                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw);", t, count=1)
                       mod = mod or (n > 0); got_us = got_us or (n > 0)
                   md = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", t)
                   if md:
@@ -208,11 +212,11 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Monotonic clock (no leap_add_stall!) + 1024-chunked audio + Steve de-interlacer + strict BTN_TOUCH & linuxraw keyboard block
+          # 7. Monotonic clock + 5292-frame mixer buffer + 1024-chunked audio + Steve de-interlacer + strict BTN_TOUCH
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 3528;", ct, count=1)
-          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 1764 ? 1764 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
+          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 5292;", ct, count=1)
+          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 3528 ? 3528 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
           ct, n_arun = re.subn(r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}", lambda _: arun_rep, ct, count=1, flags=re.S)
           assert n_abuf == 1 and n_arun == 1, f"Audio patch mismatch: {n_abuf},{n_arun}"
 
@@ -243,7 +247,7 @@ jobs:
           static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = -100, g_lsy = -100, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ever = false, g_deb_pressed = false;
-          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_last_uscr_u = 0;
+          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0;
           static unsigned int g_last_ms = 0;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
           static FILE *g_tfp = NULL;
@@ -260,7 +264,7 @@ jobs:
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
           static bool leap_env_cb(unsigned cmd, void *data) {
-              if (cmd == 14) return true; /* Block RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK from linuxraw */
+              if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) return true;
               return g_orig_env ? g_orig_env(cmd, data) : false;
           }
           extern "C" unsigned int leapster_hw_get_millis(void) {
@@ -278,16 +282,15 @@ jobs:
               g_uscr++; g_uscr_f++;
               if (g_total_runs < 5) return 0;
               uint64_t u = leap_us();
-              const uint64_t min_gap = 50000ULL;
-              if (g_last_uscr_u && u < g_last_uscr_u + min_gap) {
-                  unsigned int w = (unsigned int)((g_last_uscr_u + min_gap - u + 999ULL) / 1000ULL);
-                  if (w > 50) w = 50;
-                  return w;
+              if (!g_bucket_u) g_bucket_u = u;
+              if (u > g_bucket_u + 90000ULL) g_bucket_u = u - 90000ULL;
+              g_bucket_u += 45000ULL;
+              if (g_bucket_u > u) {
+                  unsigned int w = (unsigned int)((g_bucket_u - u + 999ULL) / 1000ULL);
+                  return w > 45 ? 45 : w;
               }
-              g_last_uscr_u = u;
               return 0;
           }
-          extern "C" void leapster_pace_done(void) { g_last_uscr_u = leap_us(); }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) {
@@ -339,7 +342,6 @@ jobs:
                                   uint16_t a1 = (p10 == p11) ? p10 : LAVG16(p10, p11);
                                   if (a0 == a1) { o[x] = a0; continue; }
                                   bool dk0 = LDK16(p00) && LDK16(p01), dk1 = LDK16(p10) && LDK16(p11);
-                                  o[x] = (dk0 && !dk1) ? a0_noop : 0;
                                   o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG16(a0, a1));
                               }
                           }
@@ -391,17 +393,17 @@ jobs:
                   } else if (ev.type == EV_SYN && ev.code == SYN_REPORT) {
                       if (g_tch) {
                           int tx, ty; leap_map_xy(g_cx, g_cy, &tx, &ty);
-                          if (!(tx <= 2 && ty <= 2)) { g_rx = g_cx; g_ry = g_cy; syn_down = true; g_ever = true; g_last_down_u = now; }
+                          if (!(tx <= 3 && ty <= 3)) { g_rx = g_cx; g_ry = g_cy; syn_down = true; g_ever = true; g_last_down_u = now; }
                       }
                   }
               }
               if (g_tch) {
                   int tx, ty; leap_map_xy(g_cx, g_cy, &tx, &ty);
-                  if (!(tx <= 2 && ty <= 2)) { g_rx = g_cx; g_ry = g_cy; syn_down = true; g_ever = true; g_last_down_u = now; }
+                  if (!(tx <= 3 && ty <= 3)) { g_rx = g_cx; g_ry = g_cy; syn_down = true; g_ever = true; g_last_down_u = now; }
               }
               if (!g_ever) return;
               if (!g_deb_pressed) {
-                  if (syn_down && (now - g_last_rel_u >= 180000ULL)) {
+                  if (syn_down && (now - g_last_rel_u >= 250000ULL)) {
                       int sx, sy; leap_map_xy(g_rx, g_ry, &sx, &sy);
                       g_deb_pressed = true;
                       g_lsx = sx; g_lsy = sy;
@@ -416,7 +418,7 @@ jobs:
                           g_rx_out = (int16_t)(((long)sx * 0xffffL) / 320L - 0x7fffL);
                           g_ry_out = (int16_t)(((long)sy * 0xffffL) / 240L - 0x7fffL);
                       }
-                  } else if (now - g_last_down_u >= 35000ULL) {
+                  } else if (now - g_last_down_u >= 60000ULL) {
                       g_deb_pressed = false;
                       g_last_rel_u = now;
                   }
@@ -449,7 +451,6 @@ jobs:
               }
           }
           """
-          hook = hook.replace("o[x] = (dk0 && !dk1) ? a0_noop : 0;\n                                  ", "")
           pos = min(re.search(fn, ct).start() for fn in [r"void\s+retro_set_environment\b", r"static\s+void\s+audio_run\b", r"void\s+retro_set_input_state\b", r"void\s+retro_set_audio_sample_batch\b", r"void\s+retro_set_video_refresh\b", r"void\s+retro_run\b"])
           ct = ct[:pos] + hook + "\n" + ct[pos:]
           ct, n_env = re.subn(r"(void\s+retro_set_environment\s*\(\s*retro_environment_t\s+(\w+)\s*\)\s*\{)", r"\1 g_orig_env = \2; \2 = leap_env_cb;", ct, count=1)
