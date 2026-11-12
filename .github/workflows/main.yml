@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V23 (Monotonic Clock + Strict BTN_TOUCH + Token-Bucket Pacer)
+name: Build ScummVM Libretro Core V24 (40ms ALSA-Matched Buffer + Monotonic Stall Sync)
 
 on:
   push:
@@ -23,7 +23,7 @@ jobs:
           python3 - << 'EOF'
           import os, re
 
-          # 1. Enable scumm, scumm_7_8, he, and mediastation
+          # 1. Enable scumm, scumm_7_8, he, and mediastation + dump mediastation sound sources for build_report.txt
           for name in ["lite_engines.list", "engines.lite"]:
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
                   f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
@@ -31,6 +31,11 @@ jobs:
           if os.path.exists(ms_cfg):
               mtxt = open(ms_cfg, "r").read()
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
+
+          with open("../upstream_v24.txt", "w") as df:
+              for p in ["engines/mediastation/audio.cpp", "engines/mediastation/actors/sound.cpp"]:
+                  if os.path.exists(p):
+                      df.write(f"\n=== {p} ===\n" + open(p, errors="ignore").read()[:20000])
 
           # 2. Generic detection unlock + auto-accept unsupported game warning (V14)
           adv = "engines/advancedDetector.cpp"
@@ -123,7 +128,7 @@ jobs:
           assert n_al == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 6. Direct 1:1 stylus click in libretro-os-inputs.cpp + token-bucket 22Hz updateScreen pacer
+          # 6. Direct 1:1 stylus click + token-bucket 22Hz updateScreen pacer + raw-clock delayMillis
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
               "void OSystem_libretro::processInputs(void) {",
@@ -178,7 +183,7 @@ jobs:
           \t"""
           open(inp_p, "w").write(inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
 
-          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); }\n'
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); unsigned int leapster_raw_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); }\n'
           got_gm = got_us = got_dm = False
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -202,9 +207,9 @@ jobs:
                       nfn = (
                           f'extern "C" void leapster_os_delay(unsigned int ms) {{ if (g_system) g_system->delayMillis(ms); }}\n'
                           f"void OSystem_libretro::delayMillis(uint {p}) {{\n"
-                          f"\tuint32 st = getMillis(), el = 0;\n"
+                          f"\tuint32 st = (uint32)leapster_raw_millis(), el = 0;\n"
                           f"\tif ({p} == 0) {{ {chk}; return; }}\n"
-                          f"\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = getMillis() - st; }}\n"
+                          f"\twhile (el < {p}) {{ if (!{chk}) leapster_sleep_us(500); el = (uint32)leapster_raw_millis() - st; }}\n"
                           f"\tleapster_telem_delay({p}, el);\n"
                           f"}}"
                       )
@@ -212,13 +217,18 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Monotonic clock + 5292-frame mixer buffer + 1024-chunked audio + Steve de-interlacer + strict BTN_TOUCH
+          # 7. 1764-frame (40ms = 1 ALSA period = 25Hz floor) buffer + monotonic stall sync + latency block + Steve de-interlacer
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 5292;", ct, count=1)
-          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 3528 ? 3528 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
+          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 1764;", ct, count=1)
+          ct, n_clamp = re.subn(
+              r"if\s*\(\s*samples_to_read\s*>\s*samples_buffer_size\s*\)\s*samples_to_read\s*=\s*samples_buffer_size\s*;",
+              "if (samples_to_read > samples_buffer_size) { leap_add_stall(samples_to_read - samples_buffer_size, sample_rate); samples_to_read = samples_buffer_size; }",
+              ct, count=1
+          )
+          arun_rep = "leap_telem_mix(samples_produced);\n\tif (!samples_produced && samples_to_read > 0) { uint32 sil = samples_to_read > 1764 ? 1764 : samples_to_read; memset(audio_sample_buffer, 0, sil * 2 * sizeof(int16)); samples_produced = sil; }\n\tav_status &= ~AUDIO_STATUS_MUTE;"
           ct, n_arun = re.subn(r"/\*\s*Workaround as currently there's no way to detect silence-only.*?av_status\s*\|=\s*AUDIO_STATUS_MUTE;\s*return;\s*\}", lambda _: arun_rep, ct, count=1, flags=re.S)
-          assert n_abuf == 1 and n_arun == 1, f"Audio patch mismatch: {n_abuf},{n_arun}"
+          assert n_abuf == 1 and n_clamp == 1 and n_arun == 1, f"Audio patch mismatch: {n_abuf},{n_clamp},{n_arun}"
 
           hook = r"""
           #include <fcntl.h>
@@ -247,7 +257,7 @@ jobs:
           static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = -100, g_lsy = -100, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ever = false, g_deb_pressed = false;
-          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0;
+          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_stall_us = 0, g_stall_win_us = 0;
           static unsigned int g_last_ms = 0;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
           static FILE *g_tfp = NULL;
@@ -259,18 +269,38 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V23 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V24 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | stl_ms | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
           static bool leap_env_cb(unsigned cmd, void *data) {
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) return true;
+          #ifdef RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY
+              if (cmd == RETRO_ENVIRONMENT_SET_MINIMUM_AUDIO_LATENCY) return true;
+          #endif
               return g_orig_env ? g_orig_env(cmd, data) : false;
+          }
+          static void leap_add_stall(uint32 dropped_samples, uint16 sr) {
+              if (g_total_runs < 5) return;
+              uint32 r = sr ? sr : 44100;
+              uint64_t u = leap_us();
+              if (!g_t0) g_t0 = u;
+              uint64_t add_u = ((uint64_t)dropped_samples * 1000000ULL) / r;
+              if (g_t0 + g_stall_us + add_u < u) {
+                  g_stall_us += add_u;
+                  g_stall_win_us += add_u;
+              }
+          }
+          extern "C" unsigned int leapster_raw_millis(void) {
+              uint64_t u = leap_us();
+              if (!g_t0) g_t0 = u;
+              return (unsigned int)((u - g_t0) / 1000ULL);
           }
           extern "C" unsigned int leapster_hw_get_millis(void) {
               uint64_t u = leap_us();
               if (!g_t0) g_t0 = u;
-              unsigned int ms = (unsigned int)((u - g_t0) / 1000ULL);
+              uint64_t adj = g_t0 + g_stall_us;
+              unsigned int ms = (u > adj) ? (unsigned int)((u - adj) / 1000ULL) : 0U;
               if (ms < g_last_ms) ms = g_last_ms;
               else g_last_ms = ms;
               return ms;
@@ -298,7 +328,7 @@ jobs:
               size_t sent = 0, rem = f;
               const int16_t *p = d;
               while (rem > 0) {
-                  size_t ch = rem > 1024 ? 1024 : rem;
+                  size_t ch = rem > 882 ? 882 : rem;
                   sent += g_orig_aud(p, ch);
                   p += ch * 2;
                   rem -= ch;
@@ -357,7 +387,7 @@ jobs:
           #define LNB(x) ((((x) - 1) / LBPL) + 1)
           #define LTB(b, a) ((a[(b) / LBPL] >> ((b) % LBPL)) & 1)
           static void leap_map_xy(int rx, int ry, int *ox, int *oy) {
-              int sx = g_pcal_on ? (int)((g_pcal[0] * (long)rx + g_pcal[1] * (long)ry + g_pcal[2]) / g_pcal[6]) : ((g_mxx > g_mnx) ? ((rx - g_mnx) * 320) / (g_mxx - g_mnx) : rx);
+              int sx = g_pcal_on ? (int)((g_pcal[0] * (long)rx + g_pcal[1] * (long)rx * 0 + g_pcal[1] * (long)ry + g_pcal[2]) / g_pcal[6]) : ((g_mxx > g_mnx) ? ((rx - g_mnx) * 320) / (g_mxx - g_mnx) : rx);
               int sy = g_pcal_on ? (int)((g_pcal[3] * (long)rx + g_pcal[4] * (long)ry + g_pcal[5]) / g_pcal[6]) : ((g_mxy > g_mny) ? ((ry - g_mny) * 240) / (g_mxy - g_mny) : ry);
               *ox = sx < 0 ? 0 : (sx > 319 ? 319 : sx);
               *oy = sy < 0 ? 0 : (sy > 239 ? 239 : sy);
@@ -445,9 +475,11 @@ jobs:
               if (!g_win) { leap_open_log(); g_win = u; }
               g_total_runs++; g_runs++;
               if (u - g_win >= 1000000ULL) {
-                  g_sec++; uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL), mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 44100U;
-                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %3ux%-3u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, g_vw, g_vh, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
-                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = 0;
+                  g_sec++;
+                  uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL);
+                  uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 44100U, sm = (uint32_t)(g_stall_win_us / 1000ULL);
+                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %6u | %3ux%-3u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, sm, g_vw, g_vh, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
+                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = 0; g_stall_win_us = 0;
               }
           }
           """
@@ -484,14 +516,17 @@ jobs:
             echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
+            echo "=== BINARY SIZE ===" >> /work/build_report.txt
+            ls -lh scummvm_libretro.so >> /work/build_report.txt
+            cat /work/upstream_v24.txt >> /work/build_report.txt || true
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V23
+      - name: Upload ScummVM Libretro Core V24
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v23
+          name: scummvm_libretro_leapster_v24
           path: |
             scummvm_libretro.so
             build_scummvm.log
