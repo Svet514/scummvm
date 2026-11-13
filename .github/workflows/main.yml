@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V31 (Exact 41155Hz Hardware DAC Match + Clean Sync)
+name: Build ScummVM Libretro Core V32 (15FPS HE Video Sync + Clean 41155Hz DAC Lock)
 
 on:
   push:
@@ -101,16 +101,16 @@ jobs:
                   fp = os.path.join(root, fn)
                   st = open(fp, errors="ignore").read()
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
-                  ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
                   ns = ns.replace("pointer_device = RETRO_DEVICE_JOYPAD", "pointer_device = RETRO_DEVICE_POINTER")
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5a. HE video backslash & directory fallback
+          # 5a. HE video backslash fallback + native Smacker/Bink frame-rate pacer (prevents 1.5x-2x .dat speedup & phrase skipping)
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
-              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\nextern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags);', 1
+              '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\n'
+              'extern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms); void leapster_pace_he_video(void); }', 1
           )
           anim_fix = """
               static bool s_dirIndexed = false;
@@ -121,11 +121,12 @@ jobs:
               size_t sl = rawStr.findLastOf('/');
               Common::Path baseOnly((sl == Common::String::npos) ? rawStr : rawStr.substr(sl + 1), '/');
               bool loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
-              if (!loaded) { leapster_telem_video(rawStr.c_str(), 0, 0, 0, flags); warning("Failed to load video file %s", rawStr.c_str()); return -1; }
-              leapster_telem_video(rawStr.c_str(), 1, _video->getWidth(), _video->getHeight(), flags);
+              if (!loaded) { leapster_telem_video(rawStr.c_str(), 0, 0, 0, flags, 0, 0); warning("Failed to load video file %s", rawStr.c_str()); return -1; }
+              leapster_telem_video(rawStr.c_str(), 1, _video->getWidth(), _video->getHeight(), flags, (unsigned int)_video->getFrameCount(), (unsigned int)_video->getDuration().msecs());
           """
           anim_t, n_al = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_fix, anim_t, count=1)
-          assert n_al == 1, "Failed to patch animation_he.cpp"
+          anim_t, n_dn = re.subn(r'_video->decodeNextFrame\(\s*\)', '(leapster_pace_he_video(), _video->decodeNextFrame())', anim_t)
+          assert n_al == 1 and n_dn >= 1, f"Failed to patch animation_he.cpp: {n_al},{n_dn}"
           open(anim_p, "w").write(anim_t)
 
           # 5b. MediaStation AudioSequence 260ms speaker-drain guard (for The Lion King final words)
@@ -165,7 +166,7 @@ jobs:
           assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1, f"MediaStation audio patch mismatch: {n_ms1},{n_ms2},{n_ms3}"
           open(ms_aud_p, "w").write(ms_aud_t)
 
-          # 6. Monotonic getMillis, delayMillis, 25Hz (40ms) updateScreen token-bucket pacer, and 1:1 stylus input
+          # 6. Monotonic getMillis, delayMillis, 25Hz interactive updateScreen cap, and 1:1 stylus input
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
               "void OSystem_libretro::processInputs(void) {",
@@ -254,7 +255,7 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Exact 41155Hz MixerImpl + 44100.0 AV report (1:1 RetroArch passthrough) + cleanup of V29/V30 overrides
+          # 7. Clean 41155Hz DAC-locked MixerImpl + 44100.0 AV report (zero sample splicing, zero .cfg overrides)
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_sr0 = re.subn(r"static\s+uint16\s+sample_rate\s*=\s*\d+\s*;", "static uint16 sample_rate = 41155;", ct, count=1)
@@ -281,7 +282,7 @@ jobs:
           \taudio_samples_accumulator = 0.0f;
           \taudio_last_time_usec      = 0;
           \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 823.0f;
-          \tuint32 audio_sample_buffer_size = 12288U * 2U * sizeof(int16);
+          \tuint32 audio_sample_buffer_size = 8192U * 2U * sizeof(int16);
           \taudio_sample_buffer = audio_sample_buffer ? (int16 *)realloc(audio_sample_buffer, audio_sample_buffer_size) : (int16 *)malloc(audio_sample_buffer_size);
           \tif (audio_sample_buffer)
           \t\tmemset(audio_sample_buffer, 0, audio_sample_buffer_size);
@@ -306,14 +307,13 @@ jobs:
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
           \taudio_last_time_usec = now_usec;
           \tif (g_total_runs < 5 && delta_usec > 40000) delta_usec = 40000;
-          \tif (delta_usec > 250000) delta_usec = 250000;
+          \tif (delta_usec > 140000) delta_usec = 140000;
 
-          \t/* Exact LeapsterGS LF2000 nx-i2s clkdiv=13 hardware clock: 147500000 / (14 * 256) = 41155.134 Hz */
           \tconst float hw_sr = 147500000.0f / (14.0f * 256.0f);
           \tfloat samples_target = audio_samples_accumulator + (hw_sr * (float)delta_usec) / 1000000.0f;
           \tuint32 samples_to_read = (uint32)samples_target;
           \taudio_samples_accumulator = samples_target - (float)samples_to_read;
-          \tif (samples_to_read > 11000U) samples_to_read = 11000U;
+          \tif (samples_to_read > 6000U) samples_to_read = 6000U;
           \tif (samples_to_read == 0) return;
 
           \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2U * sizeof(int16));
@@ -324,28 +324,17 @@ jobs:
           \t\tif (v > 16 || v < -16) { has_audio = true; break; }
           \t}
 
-          \tint16 *send_ptr = audio_sample_buffer;
           \tuint32 send_frames = 0;
           \tif (has_audio) {
           \t\tleap_telem_mix(samples_produced);
-          \t\tif (samples_produced > 5760U) {
-          \t\t\t/* Only on multi-100ms room-load stalls (>140ms), prime ALSA to 50% (80ms = 3292 frames) so it never blocks */
-          \t\t\tuint32 trim = samples_produced - 3292U;
-          \t\t\tsend_ptr = audio_sample_buffer + (trim << 1);
-          \t\t\tsend_frames = 3292U;
-          \t\t\tfor (uint32 k = 0; k < 32U; ++k) {
-          \t\t\t\tsend_ptr[k * 2U]     = (int16)(((int)audio_sample_buffer[k * 2U] * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
-          \t\t\t\tsend_ptr[k * 2U + 1] = (int16)(((int)audio_sample_buffer[k * 2U + 1] * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
-          \t\t\t}
-          \t\t} else {
-          \t\t\tsend_frames = samples_produced;
-          \t\t}
+          \t\tsend_frames = samples_produced;
           \t} else {
           \t\tsend_frames = (samples_to_read > 1317U) ? 1317U : samples_to_read;
           \t\tmemset(audio_sample_buffer, 0, send_frames * 2U * sizeof(int16));
           \t}
           \tav_status &= ~AUDIO_STATUS_MUTE;
 
+          \tint16 *send_ptr = audio_sample_buffer;
           \twhile (send_frames > 0) {
           \t\tuint32 ch = (send_frames > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : send_frames;
           \t\taudio_batch_cb(send_ptr, ch);
@@ -373,45 +362,29 @@ jobs:
           float __wrap_logf(float x) { return (float)log((double)x); }
           float __wrap_log2f(float x) { return (float)(log((double)x) * 1.4426950408889634); }
           float __wrap_powf(float x, float y) { return (float)pow((double)x, (double)y); }
-          }
-          /* Remove V29/V30 48kHz per-core override files before RetroArch reads overrides */
-          __attribute__((constructor))
-          static void leap_cleanup_v30_override(void) {
-              const char *home = getenv("HOME");
-              if (!home || !*home) home = "/root";
-              const char *names[2] = { "scummvm", "ScummVM" };
-              char p[256];
-              for (int i = 0; i < 2; ++i) {
-                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.cfg", home, names[i], names[i]);
-                  unlink(p);
-                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.opt", home, names[i], names[i]);
-                  unlink(p);
-                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s", home, names[i]);
-                  rmdir(p);
-              }
+          void leapster_os_delay(unsigned int ms);
           }
           static retro_environment_t g_orig_env = NULL;
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
           static retro_video_refresh_t g_orig_vid = NULL;
           static int g_ts_fd = -2, g_pcal_on = 0, g_has_btn = 0, g_dbpp = 0;
-          static char g_ts_nm[64] = "none";
           static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = -100, g_lsy = -100, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ever = false, g_deb_pressed = false;
-          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0;
-          static unsigned int g_last_ms = 0;
+          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_vid_bucket_u = 0, g_vid_frame_u = 66667ULL;
+          static unsigned int g_last_ms = 0, g_vid_rem = 0;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
           static FILE *g_tfp = NULL;
           static uint64_t g_t0 = 0, g_win = 0, g_pre_u = 0, g_emu_u = 0;
-          static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_uscr_f = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
+          static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
           static unsigned g_vw = 0, g_vh = 0;
           static uint32_t g_d32[320 * 240];
           static uint16_t g_d16[320 * 240];
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V31 (mixer=%u, av=44100) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n", (unsigned)(sample_rate ? sample_rate : 41155)); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V32 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -431,7 +404,7 @@ jobs:
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
           extern "C" void leapster_telem_click(void) { g_clicks++; }
           extern "C" unsigned int leapster_pace_update_screen(void) {
-              g_uscr++; g_uscr_f++;
+              g_uscr++;
               if (g_total_runs < 5) return 0;
               uint64_t u = leap_us();
               if (!g_bucket_u) g_bucket_u = u;
@@ -443,7 +416,38 @@ jobs:
               }
               return 0;
           }
-          extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
+          extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms) {
+              leap_open_log();
+              uint64_t fu = 66667ULL;
+              if (ok && fcnt > 2U && dur_ms > 0U) {
+                  fu = ((uint64_t)dur_ms * 1000ULL) / (uint64_t)fcnt;
+                  if (fu < 66667ULL) fu = 66667ULL;   /* Cap HE .dat animations at <= 15.0 FPS so scummLoop never chops speech */
+                  if (fu > 100000ULL) fu = 100000ULL; /* Floor at 10.0 FPS */
+              }
+              g_vid_frame_u = fu;
+              g_vid_rem = (ok && fcnt > 2U) ? fcnt : 0U;
+              g_vid_bucket_u = 0;
+              if (g_tfp) {
+                  fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x frames=%u dur_ms=%u step_us=%llu\n",
+                      fn ? fn : "", ok, w, h, flags, fcnt, dur_ms, (unsigned long long)fu);
+                  fflush(g_tfp);
+              }
+          }
+          extern "C" void leapster_pace_he_video(void) {
+              if (g_vid_rem == 0U) return;
+              uint64_t u = leap_us();
+              if (!g_vid_bucket_u) {
+                  g_vid_bucket_u = u;
+                  return;
+              }
+              if (u > g_vid_bucket_u + g_vid_frame_u)
+                  g_vid_bucket_u = u - g_vid_frame_u;
+              g_vid_bucket_u += g_vid_frame_u;
+              if (g_vid_bucket_u > u) {
+                  unsigned int w = (unsigned int)((g_vid_bucket_u - u + 500ULL) / 1000ULL);
+                  if (w > 0U && w <= 100U) leapster_os_delay(w);
+              }
+          }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) {
               if (!g_orig_aud || !d || f == 0) return f;
@@ -540,7 +544,7 @@ jobs:
                       if (ioctl(fd, EVIOCGBIT(0, sizeof(evb)), evb) >= 0 && LTB(EV_ABS, evb) && ioctl(fd, EVIOCGBIT(EV_ABS, sizeof(abb)), abb) >= 0 && LTB(ABS_X, abb) && LTB(ABS_Y, abb)) {
                           ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(kyb)), kyb);
                           int hb = (LTB(BTN_TOUCH, kyb) || LTB(BTN_LEFT, kyb)) ? 1 : 0;
-                          if (hb || strstr(nm, "touch") || strstr(nm, "ts")) { g_ts_fd = fd; g_has_btn = hb; snprintf(g_ts_nm, sizeof(g_ts_nm), "event%d:%s", i, nm); break; }
+                          if (hb || strstr(nm, "touch") || strstr(nm, "ts")) { g_ts_fd = fd; g_has_btn = hb; break; }
                       }
                       close(fd);
                   }
@@ -606,7 +610,7 @@ jobs:
               }
               return 0;
           }
-          static void leap_pre(void) { g_uscr_f = 0; leap_touch(); g_pre_u = leap_us(); }
+          static void leap_pre(void) { leap_touch(); g_pre_u = leap_us(); }
           static void leap_post(void) {
               uint64_t u = leap_us(); if (g_pre_u && u > g_pre_u) g_emu_u += (u - g_pre_u);
               if (!g_win) { leap_open_log(); g_win = u; }
@@ -634,7 +638,7 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. Proven Cortex-A9 VFPv3-D16 flags (--wrap keeps GLIBC at or below 2.17)
+          # 8. Proven Cortex-A9 VFPv3-D16 flags (--wrap keeps GLIBC <= 2.17)
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -mno-unaligned-access -fsigned-char -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
@@ -658,11 +662,11 @@ jobs:
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V31
+      - name: Upload ScummVM Libretro Core V32
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v31
+          name: scummvm_libretro_leapster_v32
           path: |
             scummvm_libretro.so
             build_scummvm.log
