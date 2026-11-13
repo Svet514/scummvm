@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V34 (V32 Base + Standard 44100Hz Sync + Zero-Underrun Audio)
+name: Build ScummVM Libretro Core V35 (Variable FPS + True 1.0x 44100Hz Sync + Zero-Block Resampler)
 
 on:
   push:
@@ -105,12 +105,12 @@ jobs:
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5a. Exact V32 HE video backslash fallback + header frame-rate pacer
+          # 5a. HE video backslash fallback + real-time per-header variable FPS pacer + clean close reset
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_t = open(anim_p, "r").read().replace(
               '#include "common/scummsys.h"',
               '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\n'
-              'extern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms); void leapster_pace_he_video(void); }', 1
+              'extern "C" { void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms); void leapster_pace_he_video(void); void leapster_close_he_video(void); }', 1
           )
           anim_fix = """
               static bool s_dirIndexed = false;
@@ -126,6 +126,7 @@ jobs:
           """
           anim_t, n_al = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_fix, anim_t, count=1)
           anim_t, n_dn = re.subn(r'_video->decodeNextFrame\(\s*\)', '(leapster_pace_he_video(), _video->decodeNextFrame())', anim_t)
+          anim_t, n_cl = re.subn(r'_video->close\(\s*\)\s*;', '_video->close(); leapster_close_he_video();', anim_t)
           assert n_al == 1 and n_dn >= 1, f"Failed to patch animation_he.cpp: {n_al},{n_dn}"
           open(anim_p, "w").write(anim_t)
 
@@ -166,7 +167,7 @@ jobs:
           assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1, f"MediaStation audio patch mismatch: {n_ms1},{n_ms2},{n_ms3}"
           open(ms_aud_p, "w").write(ms_aud_t)
 
-          # 6. V32 getMillis, delayMillis, 1-frame-bounded updateScreen pacer, and 1:1 stylus input
+          # 6. True 1.0x getMillis, delayMillis, non-interfering variable-FPS updateScreen hook, and 1:1 stylus input
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
               "void OSystem_libretro::processInputs(void) {",
@@ -255,7 +256,7 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Standard 44100Hz MixerImpl & AV Info + Unified Hardware I2S Clock + Unconditional Silence Feed (zero consonant XRUNs)
+          # 7. Standard 44100Hz MixerImpl + Sample-Continuous 16.16 DAC Output Resampler + Full Silence Keepalive
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_sr0 = re.subn(r"static\s+uint16\s+sample_rate\s*=\s*\d+\s*;", "static uint16 sample_rate = 44100;", ct, count=1)
@@ -290,41 +291,69 @@ jobs:
               if dp == 0: ar_e = i + 1; break
           new_arun = """static void audio_run(void) {
           \tif (!audio_sample_buffer || !g_system) return;
-          \t/* Unified 44100Hz I2S clock: 44100 samples = 1000ms in getMillis(), MixerImpl, and ALSA */
-          \tretro_time_t now_usec = (retro_time_t)leap_clk_us();
+          \tretro_time_t now_usec = cpu_features_get_time_usec();
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
-          \t\taudio_last_time_usec = now_usec - 40000;
+          \t\taudio_last_time_usec = now_usec - 25000;
           \t\taudio_samples_accumulator = 0.0f;
           \t}
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
           \taudio_last_time_usec = now_usec;
-          \tif (g_total_runs < 5 && delta_usec > 45000) delta_usec = 45000;
-          \tif (delta_usec > 240000) delta_usec = 240000;
+          \tif (g_total_runs < 5 && delta_usec > 40000) delta_usec = 40000;
+          \tif (delta_usec > 220000) delta_usec = 220000;
 
-          \tbool was_load_stall = (delta_usec > 160000);
+          \t/* Mix 100% real-time standard 44100Hz in ScummVM so SoundHE and getMillis() stay locked 1:1 */
           \tfloat samples_target = audio_samples_accumulator + (44100.0f * (float)delta_usec) / 1000000.0f;
           \tuint32 samples_to_read = (uint32)samples_target;
-          \taudio_samples_accumulator = was_load_stall ? 0.0f : (samples_target - (float)samples_to_read);
-          \tif (samples_to_read > 11000U) samples_to_read = 11000U;
+          \taudio_samples_accumulator = samples_target - (float)samples_to_read;
+          \tif (samples_to_read > 10000U) samples_to_read = 10000U;
           \tif (samples_to_read == 0) return;
 
           \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2U * sizeof(int16));
-          \tbool has_audio = false;
-          \tuint32 tot_i16 = samples_produced << 1;
-          \tfor (uint32 i = 0; i < tot_i16; ++i) {
-          \t\tint v = audio_sample_buffer[i];
-          \t\tif (v > 16 || v < -16) { has_audio = true; break; }
+          \tuint32 in_frames = samples_produced;
+          \tif (in_frames > 0) {
+          \t\tleap_telem_mix(in_frames);
+          \t} else {
+          \t\t/* mixCallback returns 0 when idle: zero-fill full frame so ALSA never XRUNs on pauses or consonants */
+          \t\tin_frames = samples_to_read;
+          \t\tmemset(audio_sample_buffer, 0, in_frames * 2U * sizeof(int16));
           \t}
-          \tif (has_audio) leap_telem_mix(samples_produced);
 
-          \t/* Send full mixCallback output during both speech and silent stop-closures so ALSA never XRUNs on consonants */
-          \tint16 *send_ptr = audio_sample_buffer;
-          \tuint32 send_frames = samples_produced;
-          \tif (was_load_stall && send_frames > 3528U) {
-          \t\tuint32 trim = send_frames - 3528U;
-          \t\tsend_ptr = audio_sample_buffer + (trim << 1);
-          \t\tsend_frames = 3528U;
+          \t/* Linearly resample 44100Hz -> 41154Hz (step 70228 in 16.16) to match LeapsterGS clkdiv=13 DAC without ALSA bloat */
+          \tstatic uint32 s_rs_pos = 0;
+          \tstatic int s_prev_l = 0, s_prev_r = 0, s_last_out_l = 0, s_last_out_r = 0;
+          \tuint32 out_frames = 0;
+          \tuint32 idx = s_rs_pos >> 16;
+          \twhile (idx < in_frames && out_frames < 10000U) {
+          \t\tuint32 frac = s_rs_pos & 0xFFFFU;
+          \t\tint l0 = (idx == 0U) ? s_prev_l : (int)audio_sample_buffer[(idx - 1U) * 2U];
+          \t\tint r0 = (idx == 0U) ? s_prev_r : (int)audio_sample_buffer[(idx - 1U) * 2U + 1U];
+          \t\tint l1 = (int)audio_sample_buffer[idx * 2U];
+          \t\tint r1 = (int)audio_sample_buffer[idx * 2U + 1U];
+          \t\tg_dac_buf[out_frames * 2U]     = (int16)(l0 + (((l1 - l0) * (int)frac) >> 16));
+          \t\tg_dac_buf[out_frames * 2U + 1U] = (int16)(r0 + (((r1 - r0) * (int)frac) >> 16));
+          \t\tout_frames++;
+          \t\ts_rs_pos += 70228U;
+          \t\tidx = s_rs_pos >> 16;
           \t}
+          \ts_prev_l = (int)audio_sample_buffer[(in_frames - 1U) * 2U];
+          \ts_prev_r = (int)audio_sample_buffer[(in_frames - 1U) * 2U + 1U];
+          \ts_rs_pos -= (in_frames << 16);
+          \tif (out_frames == 0) return;
+
+          \t/* Cap >60ms file-load spikes to 53ms (2200 frames) so opening 09-G-IN-08B.dat never fills ALSA to 100% */
+          \tint16 *send_ptr = g_dac_buf;
+          \tuint32 send_frames = out_frames;
+          \tif (send_frames > 2500U) {
+          \t\tuint32 trim = send_frames - 2200U;
+          \t\tsend_ptr = g_dac_buf + (trim << 1);
+          \t\tsend_frames = 2200U;
+          \t\tfor (uint32 k = 0; k < 32U; ++k) {
+          \t\t\tsend_ptr[k * 2U]     = (int16)((s_last_out_l * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
+          \t\t\tsend_ptr[k * 2U + 1] = (int16)((s_last_out_r * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
+          \t\t}
+          \t}
+          \ts_last_out_l = (int)send_ptr[(send_frames - 1U) * 2U];
+          \ts_last_out_r = (int)send_ptr[(send_frames - 1U) * 2U + 1U];
           \tav_status &= ~AUDIO_STATUS_MUTE;
 
           \twhile (send_frames > 0) {
@@ -369,8 +398,9 @@ jobs:
           static unsigned int g_last_ms = 0, g_vid_rem = 0;
           static uint32_t g_scr_gen = 1, g_vid_gen = 0;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
+          static int16_t g_dac_buf[10240 * 2];
           static FILE *g_tfp = NULL;
-          static uint64_t g_t0_raw = 0, g_win = 0, g_pre_u = 0, g_emu_u = 0;
+          static uint64_t g_t0 = 0, g_win = 0, g_pre_u = 0, g_emu_u = 0;
           static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
           static unsigned g_vw = 0, g_vh = 0;
           static uint32_t g_d32[320 * 240];
@@ -378,22 +408,18 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V34 (sr=44100 standard) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V35 (sr=44100 1.0x + DAC resampler) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
-          /* Hardware I2S clock (147.5MHz / (14 * 256)) expressed in standard 44100Hz microseconds so engine & ALSA never drift */
-          static uint64_t leap_clk_us(void) {
-              uint64_t u = leap_us();
-              if (!g_t0_raw) g_t0_raw = u;
-              return 100000ULL + (((u - g_t0_raw) * 23046875ULL) / 24696000ULL);
-          }
           static bool leap_env_cb(unsigned cmd, void *data) {
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) return true;
               return g_orig_env ? g_orig_env(cmd, data) : false;
           }
           extern "C" unsigned int leapster_hw_get_millis(void) {
-              unsigned int ms = (unsigned int)(leap_clk_us() / 1000ULL);
+              uint64_t u = leap_us();
+              if (!g_t0) g_t0 = u;
+              unsigned int ms = (unsigned int)((u - g_t0) / 1000ULL);
               if (ms < g_last_ms) ms = g_last_ms;
               else g_last_ms = ms;
               return ms;
@@ -404,8 +430,9 @@ jobs:
           extern "C" unsigned int leapster_pace_update_screen(void) {
               g_uscr++;
               g_scr_gen++;
-              if (g_total_runs < 5) return 0;
-              uint64_t u = leap_clk_us();
+              /* Never stack a 40ms sleep on top of active .dat animations — let variable FPS run freely */
+              if (g_total_runs < 5 || g_vid_rem > 0U) return 0;
+              uint64_t u = leap_us();
               if (!g_bucket_u) g_bucket_u = u;
               if (u > g_bucket_u + 40000ULL) g_bucket_u = u - 40000ULL;
               g_bucket_u += 40000ULL;
@@ -415,17 +442,21 @@ jobs:
               }
               return 0;
           }
+          extern "C" void leapster_close_he_video(void) {
+              g_vid_rem = 0U;
+              g_vid_bucket_u = 0ULL;
+          }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms) {
               leap_open_log();
               uint64_t fu = 66667ULL;
               if (ok && fcnt > 2U && dur_ms > 0U) {
                   fu = ((uint64_t)dur_ms * 1000ULL) / (uint64_t)fcnt;
-                  if (fu < 66667ULL) fu = 66667ULL;
+                  if (fu < 50000ULL) fu = 50000ULL;
                   if (fu > 100000ULL) fu = 100000ULL;
               }
               g_vid_frame_u = fu;
               g_vid_rem = (ok && fcnt > 2U) ? fcnt : 0U;
-              g_vid_bucket_u = 0;
+              g_vid_bucket_u = 0ULL;
               if (g_tfp) {
                   fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x frames=%u dur_ms=%u step_us=%llu\n",
                       fn ? fn : "", ok, w, h, flags, fcnt, dur_ms, (unsigned long long)fu);
@@ -434,7 +465,8 @@ jobs:
           }
           extern "C" void leapster_pace_he_video(void) {
               if (g_vid_rem == 0U) return;
-              uint64_t u = leap_clk_us();
+              g_vid_rem--;
+              uint64_t u = leap_us();
               if (!g_vid_bucket_u) {
                   g_vid_bucket_u = u;
                   return;
@@ -454,7 +486,7 @@ jobs:
               g_af += (uint32_t)sent;
               return sent;
           }
-          /* Exact V32 LDK16/LDK32 scanline-preserving downscaler (restores full brightness/contrast on Steve) + clean dupe-frame skip */
+          /* V32 LDK16/LDK32 scanline-preserving downscaler + unchanged-frame skip */
           #define LDK16(c)  (((c) & 0xE71Cu) == 0)
           #define LAVG16(a, b) ((uint16_t)(((a) & (b)) + ((((a) ^ (b)) & 0xF7DEu) >> 1)))
           #define LDK32(c)  (((c) & 0x00E0E0E0u) == 0)
@@ -619,7 +651,7 @@ jobs:
               if (u - g_win >= 1000000ULL) {
                   g_sec++;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL);
-                  uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 44100U;
+                  uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 41155U;
                   if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %3ux%-3u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, g_vw, g_vh, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
                   g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = 0;
               }
@@ -639,7 +671,7 @@ jobs:
               if dp == 0: be = i; break
           open(cp, "w").write(ct[:bs + 1] + "\n\tleap_pre();\n" + ct[bs + 1:be] + "\n\tleap_post();\n" + ct[be:])
 
-          # 8. V32 flags + hardware unaligned ARMv7 loads (-munaligned-access) for faster Smacker video decode
+          # 8. V32 flags + hardware unaligned ARMv7 loads (-munaligned-access)
           mkf = "backends/platform/libretro/Makefile"
           mk = open(mkf, "r").read()
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -munaligned-access -fsigned-char -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
@@ -663,11 +695,11 @@ jobs:
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V34
+      - name: Upload ScummVM Libretro Core V35
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v34
+          name: scummvm_libretro_leapster_v35
           path: |
             scummvm_libretro.so
             build_scummvm.log
