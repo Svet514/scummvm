@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V28 (V23 Zero-Drop Sync + Non-Blocking Audio FIFO + Fast Blit)
+name: Build ScummVM Libretro Core V29 (Auto Per-Core Override + V23 Direct Sync + XRUN Fix)
 
 on:
   push:
@@ -123,7 +123,7 @@ jobs:
           assert n_al == 1, "Failed to patch animation_he.cpp"
           open(anim_p, "w").write(anim_t)
 
-          # 5b. MediaStation AudioSequence 260ms ALSA drain guard using V23's monotonic clock (prevents eating "brother"/"Zazu")
+          # 5b. MediaStation AudioSequence 260ms ALSA drain guard using V23's monotonic clock
           ms_aud_p = "engines/mediastation/audio.cpp"
           ms_aud_t = open(ms_aud_p, "r").read()
           ms_helper = """extern "C" unsigned int leapster_hw_get_millis(void);
@@ -249,10 +249,12 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. V23 1:1 Zero-Drop Mixer Sync + Non-Blocking Audio FIFO + Fixed Full-Buffer Silence Check + Clean Blit
+          # 7. Auto Per-Core Override Installer + 48000Hz Native Mixer Lock + V23 Direct Sync + Full-Frame Silence
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 1764;", ct, count=1)
+          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 2048;", ct, count=1)
+          ct, n_sr1 = re.subn(r"sample_rate\s*=\s*atoi\(sample_rate_var\);", "sample_rate = 48000;", ct, count=1)
+          ct, n_sr2 = re.subn(r"sample_rate\s*=\s*DEFAULT_SAMPLE_RATE;", "sample_rate = 48000;", ct, count=1)
 
           m_init = re.search(r"static\s+void\s+audio_buffer_init\s*\([^)]*\)\s*\{", ct)
           assert m_init, "Missing audio_buffer_init"
@@ -263,8 +265,7 @@ jobs:
           new_init = """static void audio_buffer_init(uint16 sample_rate, uint16 frame_rate) {
           \taudio_samples_accumulator = 0.0f;
           \taudio_last_time_usec      = 0;
-          \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 882.0f;
-          \tleap_fifo_reset();
+          \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 800.0f;
           \tuint32 audio_sample_buffer_size = 16384U * 2U * sizeof(int16);
           \taudio_sample_buffer = audio_sample_buffer ? (int16 *)realloc(audio_sample_buffer, audio_sample_buffer_size) : (int16 *)malloc(audio_sample_buffer_size);
           \tif (audio_sample_buffer)
@@ -284,39 +285,79 @@ jobs:
           \tif (!audio_sample_buffer || !g_system) return;
           \tretro_time_t now_usec = cpu_features_get_time_usec();
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
-          \t\taudio_last_time_usec = now_usec - 20000;
+          \t\taudio_last_time_usec = now_usec - 25000;
           \t\taudio_samples_accumulator = 0.0f;
           \t}
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
           \taudio_last_time_usec = now_usec;
-
-          \tuint32 sr = sample_rate ? sample_rate : 44100;
-          \tleap_alsa_drain((uint32)(((uint64_t)sr * (uint64_t)delta_usec) / 1000000ULL));
           \tif (g_total_runs < 5 && delta_usec > 40000) delta_usec = 40000;
-          \tif (delta_usec > 350000) delta_usec = 350000;
+          \tif (delta_usec > 320000) delta_usec = 320000;
 
-          \tfloat target = audio_samples_accumulator + ((float)sr * (float)delta_usec) / 1000000.0f;
-          \tuint32 samples_to_read = (uint32)target;
-          \taudio_samples_accumulator = target - (float)samples_to_read;
-          \tif (samples_to_read > 16000) samples_to_read = 16000;
+          \tuint32 sr = sample_rate ? sample_rate : 48000;
+          \t/* LF2000 nx-i2s clkdiv=12 clocks 48000Hz at 48014.32Hz (+0.03%); clkdiv=13 clocks 44100Hz at 44320.91Hz (+0.501%) */
+          \tconst float skew = (sr == 44100 || sr == 22050) ? 1.0052f : 1.0005f;
+          \tconst uint32 max_batch = (sr * 75U) / 1000U;
+          \tconst float  max_carry = (float)((sr * 45U) / 1000U);
+          \tconst uint32 stall_out = (sr * 60U) / 1000U;
+
+          \tbool was_load_stall = (delta_usec > 115000);
+          \tuint32 samples_to_read = 0;
+          \tif (was_load_stall) {
+          \t\tsamples_to_read = (uint32)(((float)sr * skew * (float)delta_usec) / 1000000.0f);
+          \t\tif (samples_to_read > 16000U) samples_to_read = 16000U;
+          \t\taudio_samples_accumulator = 0.0f;
+          \t} else {
+          \t\tfloat total = audio_samples_accumulator + ((float)sr * skew * (float)delta_usec) / 1000000.0f;
+          \t\tif (total > (float)max_batch) {
+          \t\t\tsamples_to_read = max_batch;
+          \t\t\tfloat rem = total - (float)max_batch;
+          \t\t\taudio_samples_accumulator = (rem > max_carry) ? max_carry : rem;
+          \t\t} else {
+          \t\t\tsamples_to_read = (uint32)total;
+          \t\t\taudio_samples_accumulator = total - (float)samples_to_read;
+          \t\t}
+          \t}
           \tif (samples_to_read == 0) return;
 
-          \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2 * sizeof(int16));
+          \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2U * sizeof(int16));
           \tbool has_audio = false;
           \tuint32 tot_i16 = samples_produced << 1;
           \tfor (uint32 i = 0; i < tot_i16; ++i) {
           \t\tint v = audio_sample_buffer[i];
           \t\tif (v > 16 || v < -16) { has_audio = true; break; }
           \t}
+
+          \tint16 *send_ptr = audio_sample_buffer;
+          \tuint32 send_frames = 0;
           \tif (has_audio) {
           \t\tleap_telem_mix(samples_produced);
-          \t\tleap_fifo_push(audio_sample_buffer, samples_produced);
+          \t\tif (was_load_stall && samples_produced > stall_out) {
+          \t\t\tuint32 trim = samples_produced - stall_out;
+          \t\t\tsend_ptr = audio_sample_buffer + (trim << 1);
+          \t\t\tsend_frames = stall_out;
+          \t\t\tfor (uint32 k = 0; k < 32U && k < send_frames; ++k) {
+          \t\t\t\tsend_ptr[k * 2U]     = (int16)(((int)audio_sample_buffer[k * 2U] * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
+          \t\t\t\tsend_ptr[k * 2U + 1] = (int16)(((int)audio_sample_buffer[k * 2U + 1] * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
+          \t\t\t}
+          \t\t\tleap_telem_trim(trim);
+          \t\t} else {
+          \t\t\tsend_frames = samples_produced;
+          \t\t}
+          \t} else {
+          \t\tsend_frames = was_load_stall ? ((sr * 45U) / 1000U) : samples_to_read;
+          \t\tmemset(audio_sample_buffer, 0, send_frames * 2U * sizeof(int16));
           \t}
           \tav_status &= ~AUDIO_STATUS_MUTE;
-          \tleap_fifo_flush_to_alsa(audio_batch_cb, audio_sample_buffer, samples_to_read);
+
+          \twhile (send_frames > 0) {
+          \t\tuint32 ch = (send_frames > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : send_frames;
+          \t\taudio_batch_cb(send_ptr, ch);
+          \t\tsend_frames -= ch;
+          \t\tsend_ptr += ch << 1;
+          \t}
           }"""
           ct = ct[:ar_s] + new_arun + ct[ar_e:]
-          assert n_abuf == 1, f"Audio setting patch mismatch: {n_abuf}"
+          assert n_abuf == 1 and n_sr1 == 1 and n_sr2 == 1, f"Audio setting patch mismatch: {n_abuf},{n_sr1},{n_sr2}"
 
           hook = r"""
           #include <fcntl.h>
@@ -327,6 +368,7 @@ jobs:
           #include <stdint.h>
           #include <time.h>
           #include <math.h>
+          #include <sys/stat.h>
           #include <linux/input.h>
           #include <sys/ioctl.h>
           extern "C" {
@@ -335,6 +377,35 @@ jobs:
           float __wrap_logf(float x) { return (float)log((double)x); }
           float __wrap_log2f(float x) { return (float)(log((double)x) * 1.4426950408889634); }
           float __wrap_powf(float x, float y) { return (float)pow((double)x, (double)y); }
+          }
+          /* Runs inside dlopen() BEFORE RetroArch calls config_load_override() — PS1 retroarch.cfg stays 100% untouched */
+          __attribute__((constructor))
+          static void leap_ensure_scummvm_override(void) {
+              const char *home = getenv("HOME");
+              if (!home || !*home) home = "/root";
+              char p[256];
+              snprintf(p, sizeof(p), "%s/.config", home); mkdir(p, 0755);
+              snprintf(p, sizeof(p), "%s/.config/retroarch", home); mkdir(p, 0755);
+              snprintf(p, sizeof(p), "%s/.config/retroarch/config", home); mkdir(p, 0755);
+              const char *names[2] = { "scummvm", "ScummVM" };
+              const char *cfg_body =
+                  "audio_latency = \"80\"\n"
+                  "audio_out_rate = \"48000\"\n"
+                  "video_refresh_rate = \"60.000000\"\n"
+                  "config_save_on_exit = \"false\"\n";
+              const char *opt_body =
+                  "scummvm_samplerate = \"48000 Hz\"\n"
+                  "scummvm_pointer_device = \"pointer\"\n";
+              for (int i = 0; i < 2; ++i) {
+                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s", home, names[i]);
+                  mkdir(p, 0755);
+                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.cfg", home, names[i], names[i]);
+                  FILE *fc = fopen(p, "w");
+                  if (fc) { fputs(cfg_body, fc); fclose(fc); }
+                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.opt", home, names[i], names[i]);
+                  FILE *fo = fopen(p, "w");
+                  if (fo) { fputs(opt_body, fo); fclose(fo); }
+              }
           }
           static retro_environment_t g_orig_env = NULL;
           static retro_input_state_t g_orig_in = NULL;
@@ -350,68 +421,14 @@ jobs:
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
           static FILE *g_tfp = NULL;
           static uint64_t g_t0 = 0, g_win = 0, g_pre_u = 0, g_emu_u = 0;
-          static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_uscr_f = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
+          static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_uscr_f = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_trm = 0, g_clicks = 0, g_sec = 0;
           static unsigned g_vw = 0, g_vh = 0;
           static uint32_t g_d32[320 * 240];
           static uint16_t g_d16[320 * 240];
-          #define LEAP_FIFO_CAP 16384U
-          #define LEAP_FIFO_MASK (LEAP_FIFO_CAP - 1U)
-          static int16_t g_fifo_buf[LEAP_FIFO_CAP * 2U];
-          static uint32_t g_fifo_rd = 0, g_fifo_wr = 0, g_fifo_cnt = 0, g_alsa_est = 0, g_fifo_peak = 0;
-          static void leap_fifo_reset(void) { g_fifo_rd = g_fifo_wr = g_fifo_cnt = g_alsa_est = 0; }
-          static void leap_alsa_drain(uint32_t elapsed_frames) {
-              if (g_alsa_est > elapsed_frames) g_alsa_est -= elapsed_frames;
-              else g_alsa_est = 0;
-          }
-          static void leap_fifo_push(const int16_t *src, uint32_t frames) {
-              const uint32_t max_keep = 13230U; /* 300ms safety ceiling */
-              if (frames > max_keep) { src += (frames - max_keep) * 2U; frames = max_keep; }
-              if (g_fifo_cnt + frames > max_keep) {
-                  uint32_t drop = (g_fifo_cnt + frames) - max_keep;
-                  g_fifo_rd = (g_fifo_rd + drop) & LEAP_FIFO_MASK;
-                  g_fifo_cnt -= drop;
-              }
-              uint32_t first = LEAP_FIFO_CAP - g_fifo_wr;
-              if (first > frames) first = frames;
-              memcpy(&g_fifo_buf[g_fifo_wr * 2U], src, first * 2U * sizeof(int16_t));
-              if (frames > first)
-                  memcpy(&g_fifo_buf[0], src + first * 2U, (frames - first) * 2U * sizeof(int16_t));
-              g_fifo_wr = (g_fifo_wr + frames) & LEAP_FIFO_MASK;
-              g_fifo_cnt += frames;
-              if (g_fifo_cnt > g_fifo_peak) g_fifo_peak = g_fifo_cnt;
-          }
-          static void leap_fifo_flush_to_alsa(retro_audio_sample_batch_t cb, int16_t *scratch, uint32_t req_frames) {
-              if (!cb) return;
-              const uint32_t alsa_ceil = 5292U; /* 120ms < 7056 ALSA ring: never blocks! */
-              uint32_t room = (g_alsa_est < alsa_ceil) ? (alsa_ceil - g_alsa_est) : 0U;
-              if (g_fifo_cnt > 0) {
-                  uint32_t send = g_fifo_cnt;
-                  if (send > 3087U) send = 3087U;
-                  if (send > room) send = room;
-                  uint32_t rem = send;
-                  while (rem > 0) {
-                      uint32_t ch = rem > 1024U ? 1024U : rem;
-                      uint32_t contig = LEAP_FIFO_CAP - g_fifo_rd;
-                      if (ch > contig) ch = contig;
-                      cb(&g_fifo_buf[g_fifo_rd * 2U], ch);
-                      g_fifo_rd = (g_fifo_rd + ch) & LEAP_FIFO_MASK;
-                      g_fifo_cnt -= ch;
-                      g_alsa_est += ch;
-                      rem -= ch;
-                  }
-              } else if (g_alsa_est < 882U) {
-                  uint32_t sil = req_frames > 441U ? 441U : req_frames;
-                  if (sil > 0) {
-                      memset(scratch, 0, sil * 2U * sizeof(int16_t));
-                      cb(scratch, sil);
-                      g_alsa_est += sil;
-                  }
-              }
-          }
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V28 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | fif_ms | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V29 (sr=%u) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | trim_s | d_call | d_wait | touch(x,y,p,clk)\n", (unsigned)(sample_rate ? sample_rate : 48000)); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -451,6 +468,7 @@ jobs:
           }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags) { leap_open_log(); if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x\n", fn ? fn : "", ok, w, h, flags); fflush(g_tfp); } }
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
+          static void leap_telem_trim(uint32 t) { g_trm += t; }
           static size_t leap_aud_cb(const int16_t *d, size_t f) {
               if (!g_orig_aud || !d || f == 0) return f;
               size_t sent = g_orig_aud(d, f);
@@ -619,10 +637,11 @@ jobs:
               g_total_runs++; g_runs++;
               if (u - g_win >= 1000000ULL) {
                   g_sec++;
+                  uint32_t sr = sample_rate ? sample_rate : 48000U;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL);
-                  uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 44100U, fm = (g_fifo_peak * 1000U) / 44100U;
-                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %6u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, fm, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
-                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_fifo_peak = g_clicks = 0; g_emu_u = 0;
+                  uint32_t mm = (g_mf * 1000U) / sr, am = (g_af * 1000U) / sr;
+                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %6u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, g_trm, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
+                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_trm = g_clicks = 0; g_emu_u = 0;
               }
           }
           """
@@ -664,11 +683,11 @@ jobs:
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V28
+      - name: Upload ScummVM Libretro Core V29
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v28
+          name: scummvm_libretro_leapster_v29
           path: |
             scummvm_libretro.so
             build_scummvm.log
