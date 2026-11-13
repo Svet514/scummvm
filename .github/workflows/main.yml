@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V30 (Clean Direct 48kHz Sync + Per-Core Override)
+name: Build ScummVM Libretro Core V31 (Exact 41155Hz Hardware DAC Match + Clean Sync)
 
 on:
   push:
@@ -89,7 +89,12 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Force RETRO_DEVICE_POINTER cleanly in libretro options
+          # 4. Force RETRO_DEVICE_POINTER + set DEFAULT_SAMPLE_RATE to 41155 (exact nx-i2s clkdiv=13 DAC rate)
+          defs_p = "backends/platform/libretro/include/libretro-defs.h"
+          if os.path.exists(defs_p):
+              dt = open(defs_p, "r").read()
+              open(defs_p, "w").write(re.sub(r"(#define\s+DEFAULT_SAMPLE_RATE\s+)\d+", r"\g<1>41155", dt))
+
           for root, _, files in os.walk("backends/platform/libretro"):
               for fn in files:
                   if not fn.endswith((".cpp", ".h")): continue
@@ -249,12 +254,22 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Clean 1:1 48kHz audio_run (NO trim_s, NO 75ms clamp) + 32ms silence keepalive + Per-Core ScummVM.cfg Override
+          # 7. Exact 41155Hz MixerImpl + 44100.0 AV report (1:1 RetroArch passthrough) + cleanup of V29/V30 overrides
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
+          ct, n_sr0 = re.subn(r"static\s+uint16\s+sample_rate\s*=\s*\d+\s*;", "static uint16 sample_rate = 41155;", ct, count=1)
+          ct, n_sr1 = re.subn(r"sample_rate\s*=\s*atoi\(sample_rate_var\);", "sample_rate = 41155;", ct, count=1)
+          ct, n_sr2 = re.subn(r"sample_rate\s*=\s*DEFAULT_SAMPLE_RATE;", "sample_rate = 41155;", ct, count=1)
           ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 2048;", ct, count=1)
-          ct, n_sr1 = re.subn(r"sample_rate\s*=\s*atoi\(sample_rate_var\);", "sample_rate = 48000;", ct, count=1)
-          ct, n_sr2 = re.subn(r"sample_rate\s*=\s*DEFAULT_SAMPLE_RATE;", "sample_rate = 48000;", ct, count=1)
+
+          m_av = re.search(r"void\s+retro_get_system_av_info\s*\(\s*struct\s+retro_system_av_info\s*\*\s*(\w+)\s*\)\s*\{", ct)
+          assert m_av, "Missing retro_get_system_av_info"
+          av_p = m_av.group(1)
+          dp, av_e = 0, -1
+          for i in range(m_av.end() - 1, len(ct)):
+              dp += (ct[i] == "{") - (ct[i] == "}")
+              if dp == 0: av_e = i; break
+          ct = ct[:av_e] + f"\t{av_p}->timing.sample_rate = 44100.0;\n" + ct[av_e:]
 
           m_init = re.search(r"static\s+void\s+audio_buffer_init\s*\([^)]*\)\s*\{", ct)
           assert m_init, "Missing audio_buffer_init"
@@ -265,7 +280,7 @@ jobs:
           new_init = """static void audio_buffer_init(uint16 sample_rate, uint16 frame_rate) {
           \taudio_samples_accumulator = 0.0f;
           \taudio_last_time_usec      = 0;
-          \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 800.0f;
+          \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 823.0f;
           \tuint32 audio_sample_buffer_size = 12288U * 2U * sizeof(int16);
           \taudio_sample_buffer = audio_sample_buffer ? (int16 *)realloc(audio_sample_buffer, audio_sample_buffer_size) : (int16 *)malloc(audio_sample_buffer_size);
           \tif (audio_sample_buffer)
@@ -293,11 +308,12 @@ jobs:
           \tif (g_total_runs < 5 && delta_usec > 40000) delta_usec = 40000;
           \tif (delta_usec > 250000) delta_usec = 250000;
 
-          \tuint32 sr = sample_rate ? sample_rate : 48000;
-          \tfloat samples_target = audio_samples_accumulator + ((float)sr * (float)delta_usec) / 1000000.0f;
+          \t/* Exact LeapsterGS LF2000 nx-i2s clkdiv=13 hardware clock: 147500000 / (14 * 256) = 41155.134 Hz */
+          \tconst float hw_sr = 147500000.0f / (14.0f * 256.0f);
+          \tfloat samples_target = audio_samples_accumulator + (hw_sr * (float)delta_usec) / 1000000.0f;
           \tuint32 samples_to_read = (uint32)samples_target;
           \taudio_samples_accumulator = samples_target - (float)samples_to_read;
-          \tif (samples_to_read > 12000U) samples_to_read = 12000U;
+          \tif (samples_to_read > 11000U) samples_to_read = 11000U;
           \tif (samples_to_read == 0) return;
 
           \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, samples_to_read * 2U * sizeof(int16));
@@ -308,19 +324,28 @@ jobs:
           \t\tif (v > 16 || v < -16) { has_audio = true; break; }
           \t}
 
+          \tint16 *send_ptr = audio_sample_buffer;
           \tuint32 send_frames = 0;
           \tif (has_audio) {
           \t\tleap_telem_mix(samples_produced);
-          \t\tsend_frames = samples_produced;
+          \t\tif (samples_produced > 5760U) {
+          \t\t\t/* Only on multi-100ms room-load stalls (>140ms), prime ALSA to 50% (80ms = 3292 frames) so it never blocks */
+          \t\t\tuint32 trim = samples_produced - 3292U;
+          \t\t\tsend_ptr = audio_sample_buffer + (trim << 1);
+          \t\t\tsend_frames = 3292U;
+          \t\t\tfor (uint32 k = 0; k < 32U; ++k) {
+          \t\t\t\tsend_ptr[k * 2U]     = (int16)(((int)audio_sample_buffer[k * 2U] * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
+          \t\t\t\tsend_ptr[k * 2U + 1] = (int16)(((int)audio_sample_buffer[k * 2U + 1] * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
+          \t\t\t}
+          \t\t} else {
+          \t\t\tsend_frames = samples_produced;
+          \t\t}
           \t} else {
-          \t\t/* 32ms max silence prevents ALSA XRUNs while letting excess buffer latency drain between lines */
-          \t\tuint32 max_sil = (sr * 32U) / 1000U;
-          \t\tsend_frames = (samples_to_read > max_sil) ? max_sil : samples_to_read;
+          \t\tsend_frames = (samples_to_read > 1317U) ? 1317U : samples_to_read;
           \t\tmemset(audio_sample_buffer, 0, send_frames * 2U * sizeof(int16));
           \t}
           \tav_status &= ~AUDIO_STATUS_MUTE;
 
-          \tint16 *send_ptr = audio_sample_buffer;
           \twhile (send_frames > 0) {
           \t\tuint32 ch = (send_frames > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : send_frames;
           \t\taudio_batch_cb(send_ptr, ch);
@@ -329,7 +354,7 @@ jobs:
           \t}
           }"""
           ct = ct[:ar_s] + new_arun + ct[ar_e:]
-          assert n_abuf == 1 and n_sr1 == 1 and n_sr2 == 1, f"Audio setting patch mismatch: {n_abuf},{n_sr1},{n_sr2}"
+          assert n_sr0 == 1 and n_sr1 == 1 and n_sr2 == 1 and n_abuf == 1, f"Audio patch mismatch: {n_sr0},{n_sr1},{n_sr2},{n_abuf}"
 
           hook = r"""
           #include <fcntl.h>
@@ -340,7 +365,6 @@ jobs:
           #include <stdint.h>
           #include <time.h>
           #include <math.h>
-          #include <sys/stat.h>
           #include <linux/input.h>
           #include <sys/ioctl.h>
           extern "C" {
@@ -350,32 +374,20 @@ jobs:
           float __wrap_log2f(float x) { return (float)(log((double)x) * 1.4426950408889634); }
           float __wrap_powf(float x, float y) { return (float)pow((double)x, (double)y); }
           }
+          /* Remove V29/V30 48kHz per-core override files before RetroArch reads overrides */
           __attribute__((constructor))
-          static void leap_ensure_scummvm_override(void) {
+          static void leap_cleanup_v30_override(void) {
               const char *home = getenv("HOME");
               if (!home || !*home) home = "/root";
-              char p[256];
-              snprintf(p, sizeof(p), "%s/.config", home); mkdir(p, 0755);
-              snprintf(p, sizeof(p), "%s/.config/retroarch", home); mkdir(p, 0755);
-              snprintf(p, sizeof(p), "%s/.config/retroarch/config", home); mkdir(p, 0755);
               const char *names[2] = { "scummvm", "ScummVM" };
-              const char *cfg_body =
-                  "audio_latency = \"96\"\n"
-                  "audio_out_rate = \"48000\"\n"
-                  "video_refresh_rate = \"60.000000\"\n"
-                  "config_save_on_exit = \"false\"\n";
-              const char *opt_body =
-                  "scummvm_samplerate = \"48000 Hz\"\n"
-                  "scummvm_pointer_device = \"pointer\"\n";
+              char p[256];
               for (int i = 0; i < 2; ++i) {
-                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s", home, names[i]);
-                  mkdir(p, 0755);
                   snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.cfg", home, names[i], names[i]);
-                  FILE *fc = fopen(p, "w");
-                  if (fc) { fputs(cfg_body, fc); fclose(fc); }
+                  unlink(p);
                   snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s/%s.opt", home, names[i], names[i]);
-                  FILE *fo = fopen(p, "w");
-                  if (fo) { fputs(opt_body, fo); fclose(fo); }
+                  unlink(p);
+                  snprintf(p, sizeof(p), "%s/.config/retroarch/config/%s", home, names[i]);
+                  rmdir(p);
               }
           }
           static retro_environment_t g_orig_env = NULL;
@@ -399,7 +411,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/roms/scummvm_telemetry.log", "w"); if (!g_tfp) g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V30 (sr=%u) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n", (unsigned)(sample_rate ? sample_rate : 48000)); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V31 (mixer=%u, av=44100) ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | res     | d_call | d_wait | touch(x,y,p,clk)\n", (unsigned)(sample_rate ? sample_rate : 41155)); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -601,9 +613,8 @@ jobs:
               g_total_runs++; g_runs++;
               if (u - g_win >= 1000000ULL) {
                   g_sec++;
-                  uint32_t sr = sample_rate ? sample_rate : 48000U;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL);
-                  uint32_t mm = (g_mf * 1000U) / sr, am = (g_af * 1000U) / sr;
+                  uint32_t mm = (g_mf * 1000U) / 41155U, am = (g_af * 1000U) / 41155U;
                   if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %3ux%-3u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, g_vw, g_vh, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
                   g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = 0;
               }
@@ -647,11 +658,11 @@ jobs:
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V30
+      - name: Upload ScummVM Libretro Core V31
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v30
+          name: scummvm_libretro_leapster_v31
           path: |
             scummvm_libretro.so
             build_scummvm.log
