@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V39 (Final Release Polish - Zero-Block Cushion + RAM Log)
+name: Build ScummVM Libretro Core V40 (Cleaned Release - Stateless 44100Hz Sync + Talkie Audio Pump)
 
 on:
   push:
@@ -89,7 +89,7 @@ jobs:
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
               open(csh, "w").write(st)
 
-          # 4. Standard DEFAULT_SAMPLE_RATE = 44100 + 16ms coroutine audio-pump interval + RETRO_DEVICE_POINTER
+          # 4. Standard 44100Hz + 16ms coroutine interval + RETRO_DEVICE_POINTER + suppress yellow startup OSD warnings
           defs_p = "backends/platform/libretro/include/libretro-defs.h"
           if os.path.exists(defs_p):
               dt = open(defs_p, "r").read()
@@ -106,11 +106,130 @@ jobs:
                   fp = os.path.join(root, fn)
                   st = open(fp, errors="ignore").read()
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
+                  ns = re.sub(r"(void\s+retro_osd_notification\s*\([^)]*\)\s*\{)", r"\1 return;", ns)
                   ns = ns.replace("pointer_device = RETRO_DEVICE_JOYPAD", "pointer_device = RETRO_DEVICE_POINTER")
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
                   if ns != st: open(fp, "w").write(ns)
 
-          # 5a. HE video backslash fallback + 15.20 FPS Smacker audio-cushion pacer + mid-decode audio pump
+          # 5a. HE video backslash fallback + 15.20 FPS Smacker audio-cushion pacer + mid-decode & talkie-load audio pump
+          anim_p = "engines/scumm/he/animation_he.cpp"
+          The complete, unbroken `.github/workflows/main.yml` for **V40** is below, sanitized to pure ASCII spaces (removing the zero-width space and collapsed YAML newlines from the truncated output):
+
+```yaml
+name: Build ScummVM Libretro Core V40 (Cleaned Release - Stateless 44100Hz Sync + Talkie Audio Pump)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+concurrency:
+  group: scummvm-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Clone & Patch ScummVM v2026.4.0
+        run: |
+          rm -rf scummvm-2026.4.0
+          git clone --depth 1 --branch v2026.4.0 [https://github.com/scummvm/scummvm.git](https://github.com/scummvm/scummvm.git) scummvm-2026.4.0
+          cd scummvm-2026.4.0
+
+          python3 - << 'EOF'
+          import os, re
+
+          # 1. Enable scumm, scumm_7_8, he, and mediastation
+          for name in ["lite_engines.list", "engines.lite"]:
+              with open(os.path.join("backends/platform/libretro", name), "w") as f:
+                  f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
+          ms_cfg = "engines/mediastation/configure.engine"
+          if os.path.exists(ms_cfg):
+              mtxt = open(ms_cfg, "r").read()
+              open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
+
+          # 2. Generic detection unlock + auto-accept unsupported game warning
+          adv = "engines/advancedDetector.cpp"
+          at = open(adv, errors="ignore").read()
+          at = re.sub(r"\breturn\s+matched\s*;", "{ for (uint _i = 0; _i < matched.size(); ++_i) matched[_i].hasUnknownFiles = false; return matched; }", at)
+          at = re.sub(r"(\bhasUnknownFiles\s*=\s*)adGame\.hasUnknownFiles\b", r"\1false", at)
+          at = re.sub(r"(bool\s+cleanupPirated\s*\([^)]*\)\s*\{)", r"\1 return false;", at)
+          open(adv, "w").write(at)
+
+          for sdir in ["engines", "gui", "base"]:
+              for root, _, files in os.walk(sdir):
+                  for fn in files:
+                      if not fn.endswith((".cpp", ".h")): continue
+                      fp = os.path.join(root, fn)
+                      t = open(fp, errors="ignore").read()
+                      nt = re.sub(r"(bool\s+(?:[A-Za-z0-9_]+::)?warnUserAboutUnsupportedGame\s*\([^)]*\)\s*\{)", r"\1 return true;", t)
+                      if fn == "launcher.cpp": nt = re.sub(r"\b(\w+(?:\[\w+\])?)\.hasUnknownFiles\b", "false", nt)
+                      if "detection" in fn and ("ADGF_UNSTABLE" in nt or "ADGF_TESTING" in nt):
+                          nt = re.sub(r"\bADGF_(?:UNSTABLE|TESTING)\b", "0", nt)
+                      if nt != t: open(fp, "w").write(nt)
+
+          # 3. Disable unused libs while keeping HIGH_DEF=1 and USE_BINK=1
+          for mk in ["backends/imgui/module.mk", "backends/networking/basic/module.mk", "backends/networking/curl/module.mk", "backends/networking/http/module.mk", "backends/networking/sdl_net/module.mk", "backends/cloud/module.mk"]:
+              if os.path.exists(mk): open(mk, "w").write("# Disabled\n")
+          if os.path.exists("configure"):
+              cfg = open("configure", errors="ignore").read()
+              cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
+              cfg = re.sub(r"^([ \t]*_bink=).*$", r"\1yes", cfg, flags=re.M)
+              open("configure", "w").write(cfg)
+
+          ssys = "common/scummsys.h"
+          if os.path.exists(ssys):
+              stxt = open(ssys, errors="ignore").read()
+              open(ssys, "w").write(re.sub(r'(#include\s+"config\.h")', r'\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif', stxt, count=1))
+
+          dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_TREMOR", "USE_FLAC", "USE_MAD", "USE_OGG", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
+          for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
+              if os.path.exists(mr):
+                  t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", open(mr, "r").read())
+                  for v in dis: t = re.sub(rf"\b{v}\s*[:?]?=\s*1\b", f"{v} := 0", t)
+                  open(mr, "w").write(re.sub(r"\bUSE_BINK\s*[:?]?=\s*0\b", "USE_BINK := 1", t))
+
+          vp = "|".join(dis)
+          id_re, in_re = re.compile(rf"^(\s*)ifdef\s+({vp})\s*$", flags=re.M), re.compile(rf"^(\s*)ifndef\s+({vp})\s*$", flags=re.M)
+          for root, _, files in os.walk("."):
+              for fn in files:
+                  if fn.endswith(".mk") or fn in ("Makefile", "Makefile.common"):
+                      fp = os.path.join(root, fn)
+                      mt = open(fp, errors="ignore").read()
+                      nm = in_re.sub(r"\1ifneq ($(\2), 1)", id_re.sub(r"\1ifeq ($(\2), 1)", mt))
+                      if nm != mt: open(fp, "w").write(nm)
+
+          csh = "backends/platform/libretro/scripts/configure_engines.sh"
+          if os.path.exists(csh):
+              st = open(csh, "r").read().replace("--disable-bink", "--enable-bink")
+              for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
+              open(csh, "w").write(st)
+
+          # 4. Standard 44100Hz + 16ms coroutine interval + RETRO_DEVICE_POINTER + suppress yellow startup OSD warnings
+          defs_p = "backends/platform/libretro/include/libretro-defs.h"
+          if os.path.exists(defs_p):
+              dt = open(defs_p, "r").read()
+              open(defs_p, "w").write(re.sub(r"(#define\s+DEFAULT_SAMPLE_RATE\s+)\d+", r"\g<1>44100", dt))
+
+          tmr_p = "backends/platform/libretro/src/libretro-timer.cpp"
+          if os.path.exists(tmr_p):
+              tt = open(tmr_p, "r").read()
+              open(tmr_p, "w").write(re.sub(r"_interval\s*=\s*[^;]+;", "_interval = 16;", tt))
+
+          for root, _, files in os.walk("backends/platform/libretro"):
+              for fn in files:
+                  if not fn.endswith((".cpp", ".h")): continue
+                  fp = os.path.join(root, fn)
+                  st = open(fp, errors="ignore").read()
+                  ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
+                  ns = re.sub(r"(void\s+retro_osd_notification\s*\([^)]*\)\s*\{)", r"\1 return;", ns)
+                  ns = ns.replace("pointer_device = RETRO_DEVICE_JOYPAD", "pointer_device = RETRO_DEVICE_POINTER")
+                  ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
+                  if ns != st: open(fp, "w").write(ns)
+
+          # 5a. HE video backslash fallback + 15.20 FPS Smacker audio-cushion pacer + mid-decode & talkie-load audio pump
           anim_p = "engines/scumm/he/animation_he.cpp"
           anim_hdr = (
               '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\n'
@@ -145,6 +264,12 @@ jobs:
           anim_t, n_dn = re.subn(r'_video->decodeNextFrame\(\s*\)', 'leap_decode_vid_frame(_video)', anim_t)
           assert n_al == 1 and n_dn >= 1, f"Failed to patch animation_he.cpp: {n_al},{n_dn}"
           open(anim_p, "w").write(anim_t)
+
+          snd_he_p = "engines/scumm/he/sound_he.cpp"
+          if os.path.exists(snd_he_p):
+              sht = open(snd_he_p, "r").read().replace('#include "common/scummsys.h"', '#include "common/scummsys.h"\nextern "C" void leapster_pump_audio(void);', 1)
+              sht = re.sub(r"(void\s+SoundHE::hsStartDigitalSound\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", sht, count=1)
+              open(snd_he_p, "w").write(sht)
 
           # 5b. MediaStation AudioSequence 260ms speaker-drain guard (for The Lion King final words)
           ms_aud_p = "engines/mediastation/audio.cpp"
@@ -183,7 +308,7 @@ jobs:
           assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1, f"MediaStation audio patch mismatch: {n_ms1},{n_ms2},{n_ms3}"
           open(ms_aud_p, "w").write(ms_aud_t)
 
-          # 6. True 1.0x getMillis, delayMillis, non-interfering variable-FPS updateScreen hook, and 1:1 stylus input
+          # 6. True 1.0x getMillis, delayMillis, variable-FPS updateScreen hook, and 1:1 stylus input
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
               "void OSystem_libretro::processInputs(void) {",
@@ -272,7 +397,7 @@ jobs:
                   if mod: open(fp, "w").write(ext + t)
           assert got_gm and got_us and got_dm, f"OSystem hook mismatch: {got_gm},{got_us},{got_dm}"
 
-          # 7. Standard 44100Hz MixerImpl + 41% Equilibrium Cushion (70350U) + Instant Backoff (71200U)
+          # 7. Stateless 70226U Resampler (50% = 86ms natural ALSA cushion, no servo oscillation, no mid-scene audio trim)
           cp = "backends/platform/libretro/src/libretro-core.cpp"
           ct = open(cp, "r").read()
           ct, n_sr0 = re.subn(r"static\s+uint16\s+sample_rate\s*=\s*\d+\s*;", "static uint16 sample_rate = 44100;", ct, count=1)
@@ -313,11 +438,10 @@ jobs:
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
           \t\taudio_last_time_usec = now_usec - 20000;
           \t\taudio_samples_accumulator = 0.0f;
-          \t\t/* Pre-fill 58ms (2400 stereo frames) of silence so DMA starts centered near 41% ALSA fill */
           \t\tif (audio_batch_cb) {
-          \t\t\tmemset(g_dac_buf, 0, 2400U * 2U * sizeof(int16));
+          \t\t\tmemset(g_dac_buf, 0, 3200U * 2U * sizeof(int16));
           \t\t\tint16 *pp = g_dac_buf;
-          \t\t\tuint32 rem = 2400U;
+          \t\t\tuint32 rem = 3200U;
           \t\t\twhile (rem > 0) {
           \t\t\t\tuint32 ch = (rem > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : rem;
           \t\t\t\taudio_batch_cb(pp, ch);
@@ -346,12 +470,7 @@ jobs:
           \t\tmemset(audio_sample_buffer, 0, in_frames * 2U * sizeof(int16));
           \t}
 
-          \t/* 70350U parks ALSA at 41% (~70ms) via RetroArch rate_control so it never hits 0% or 100%; 71200U sheds bloat immediately */
-          \tuint32 step_fp = 70350U;
-          \tif (g_aud_backoff > 0U) {
-          \t\tg_aud_backoff--;
-          \t\tstep_fp = 71200U;
-          \t}
+          \t/* Stateless 16.16 resampler (70226U = 41154.8Hz) lets RetroArch rate_control hold 86ms cushion naturally */
           \tstatic uint32 s_rs_pos = 0;
           \tstatic int s_prev_l = 0, s_prev_r = 0, s_last_out_l = 0, s_last_out_r = 0;
           \tuint32 out_frames = 0;
@@ -365,7 +484,7 @@ jobs:
           \t\tg_dac_buf[out_frames * 2U]     = (int16)(l0 + (((l1 - l0) * (int)frac) >> 16));
           \t\tg_dac_buf[out_frames * 2U + 1U] = (int16)(r0 + (((r1 - r0) * (int)frac) >> 16));
           \t\tout_frames++;
-          \t\ts_rs_pos += step_fp;
+          \t\ts_rs_pos += 70226U;
           \t\tidx = s_rs_pos >> 16;
           \t}
           \ts_prev_l = (int)audio_sample_buffer[(in_frames - 1U) * 2U];
@@ -373,13 +492,13 @@ jobs:
           \ts_rs_pos -= (in_frames << 16);
           \tif (out_frames == 0) return;
 
-          \t/* Cap >95ms room-load stalls to 2500 frames (61ms) so transitions never push ALSA into blocking */
+          \t/* Only cap >182ms full room-load freezes; never trim normal speech or scene transitions */
           \tint16 *send_ptr = g_dac_buf;
           \tuint32 send_frames = out_frames;
-          \tif (send_frames > 3900U) {
-          \t\tuint32 trim = send_frames - 2500U;
+          \tif (send_frames > 7500U) {
+          \t\tuint32 trim = send_frames - 3200U;
           \t\tsend_ptr = g_dac_buf + (trim << 1);
-          \t\tsend_frames = 2500U;
+          \t\tsend_frames = 3200U;
           \t\tfor (uint32 k = 0; k < 32U; ++k) {
           \t\t\tsend_ptr[k * 2U]     = (int16)((s_last_out_l * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
           \t\t\tsend_ptr[k * 2U + 1] = (int16)((s_last_out_r * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
@@ -430,7 +549,7 @@ jobs:
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
           static bool g_ever = false, g_deb_pressed = false, g_in_pump = false;
           static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_vid_bucket_u = 0, g_vid_frame_u = 65800ULL, g_last_vid_decode_u = 0, g_last_aud_u = 0, g_blk_u = 0;
-          static unsigned int g_last_ms = 0, g_vid_rem = 0, g_aud_backoff = 0;
+          static unsigned int g_last_ms = 0, g_vid_rem = 0;
           static uint32_t g_scr_gen = 1, g_vid_gen = 0;
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
           static int16_t g_dac_buf[12288 * 2];
@@ -439,16 +558,15 @@ jobs:
           static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
           static uint32_t g_d32[320 * 240];
           static uint16_t g_d16[320 * 240];
-          /* Log to /tmp (tmpfs RAM disk) so NAND flash eraseblocks never stall gameplay */
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V39 Release ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V40 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
           static bool leap_env_cb(unsigned cmd, void *data) {
-              if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) return true;
+              if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK || cmd == 6U || cmd == 60U) return true;
               return g_orig_env ? g_orig_env(cmd, data) : false;
           }
           extern "C" unsigned int leapster_hw_get_millis(void) {
@@ -465,7 +583,7 @@ jobs:
           extern "C" void leapster_pump_audio(void) {
               if (g_in_pump || g_total_runs < 5) return;
               uint64_t u = leap_us();
-              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
+              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 20000ULL) {
                   g_in_pump = true;
                   leapster_os_delay(0);
                   g_in_pump = false;
@@ -475,6 +593,7 @@ jobs:
               g_uscr++;
               g_scr_gen++;
               if (g_total_runs < 5) return 0;
+              leapster_pump_audio();
               uint64_t u = leap_us();
               if (g_last_vid_decode_u && u >= g_last_vid_decode_u && (u - g_last_vid_decode_u) < 150000ULL) {
                   g_bucket_u = u;
@@ -491,7 +610,6 @@ jobs:
           }
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms) {
               leap_open_log();
-              /* 65800us (15.20 FPS) builds a gentle +13ms/sec audio cushion inside SmackerAudioTrack while keeping full phrase headroom */
               uint64_t fu = 65800ULL;
               if (ok && fcnt > 2U && dur_ms > 0U) {
                   uint64_t hdr = ((uint64_t)dur_ms * 1000ULL) / (uint64_t)fcnt;
@@ -532,9 +650,7 @@ jobs:
               if (!g_orig_aud || !d || f == 0) return f;
               uint64_t t0 = leap_us();
               size_t sent = g_orig_aud(d, f);
-              uint64_t blk = leap_us() - t0;
-              g_blk_u += blk;
-              if (blk >= 1500ULL && g_total_runs >= 5U) g_aud_backoff = 15U;
+              g_blk_u += (leap_us() - t0);
               g_af += (uint32_t)sent;
               return sent;
           }
@@ -747,11 +863,11 @@ jobs:
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
 
-      - name: Upload ScummVM Libretro Core V39
+      - name: Upload ScummVM Libretro Core V40
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v39
+          name: scummvm_libretro_leapster_v40
           path: |
             scummvm_libretro.so
             build_scummvm.log
