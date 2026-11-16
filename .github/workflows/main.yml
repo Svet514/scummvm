@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V40 (Cleaned Release - Stateless 44100Hz Sync + Talkie Audio Pump)
+name: Build ScummVM Libretro Core V41 (V39 ALSA Cushion Servo + Frame-0 Smacker Pre-Cushion + No OSD)
 
 
 
@@ -224,7 +224,7 @@ jobs:
 
 
 
-          # 5a. HE video backslash fallback + 15.20 FPS Smacker audio-cushion pacer + mid-decode & talkie-load audio pump
+          # 5a. V39 HE video backslash fallback + 15.15 FPS Smacker pacer + mid-decode audio pump (no sound_he hook)
 
           anim_p = "engines/scumm/he/animation_he.cpp"
 
@@ -293,20 +293,6 @@ jobs:
           assert n_al == 1 and n_dn >= 1, f"Failed to patch animation_he.cpp: {n_al},{n_dn}"
 
           open(anim_p, "w").write(anim_t)
-
-
-
-          snd_he_p = "engines/scumm/he/sound_he.cpp"
-
-          sht = open(snd_he_p, "r").read()
-
-          sht, n_sh1 = re.subn(r"(namespace\s+Scumm\s*\{)", r'extern "C" void leapster_pump_audio(void);\n\1', sht, count=1)
-
-          sht, n_sh2 = re.subn(r"(void\s+SoundHE::hsStartDigitalSound\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", sht, count=1)
-
-          assert n_sh1 == 1 and n_sh2 == 1, f"Failed to patch sound_he.cpp: {n_sh1},{n_sh2}"
-
-          open(snd_he_p, "w").write(sht)
 
 
 
@@ -384,7 +370,7 @@ jobs:
 
 
 
-          # 6. True 1.0x getMillis, delayMillis, variable-FPS updateScreen hook, and 1:1 stylus input
+          # 6. True 1.0x getMillis, delayMillis, V39 variable-FPS updateScreen hook, and 1:1 stylus input
 
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
 
@@ -562,7 +548,7 @@ jobs:
 
 
 
-          # 7. Stateless 70226U Resampler (50% = 86ms natural ALSA cushion, no servo oscillation, no mid-scene audio trim)
+          # 7. V39 Closed-Loop ALSA Cushion Servo (70420U steady / 71400U instant backoff + 44ms prefill + 82ms stall cap)
 
           cp = "backends/platform/libretro/src/libretro-core.cpp"
 
@@ -644,13 +630,15 @@ jobs:
 
           \t\taudio_samples_accumulator = 0.0f;
 
+          \t\t/* Pre-fill 44ms (1800 stereo frames) so ALSA starts cushioned without startup blocking */
+
           \t\tif (audio_batch_cb) {
 
-          \t\t\tmemset(g_dac_buf, 0, 3200U * 2U * sizeof(int16));
+          \t\t\tmemset(g_dac_buf, 0, 1800U * 2U * sizeof(int16));
 
           \t\t\tint16 *pp = g_dac_buf;
 
-          \t\t\tuint32 rem = 3200U;
+          \t\t\tuint32 rem = 1800U;
 
           \t\t\twhile (rem > 0) {
 
@@ -708,7 +696,17 @@ jobs:
 
 
 
-          \t/* Stateless 16.16 resampler (70226U = 41154.8Hz) lets RetroArch rate_control hold 86ms cushion naturally */
+          \t/* 70420U parks ALSA near 35% (~56ms) with zero blocking; 71400U sheds transition bloat immediately */
+
+          \tuint32 step_fp = 70420U;
+
+          \tif (g_aud_backoff > 0U) {
+
+          \t\tg_aud_backoff--;
+
+          \t\tstep_fp = 71400U;
+
+          \t}
 
           \tstatic uint32 s_rs_pos = 0;
 
@@ -736,7 +734,7 @@ jobs:
 
           \t\tout_frames++;
 
-          \t\ts_rs_pos += 70226U;
+          \t\ts_rs_pos += step_fp;
 
           \t\tidx = s_rs_pos >> 16;
 
@@ -752,19 +750,19 @@ jobs:
 
 
 
-          \t/* Only cap >182ms full room-load freezes; never trim normal speech or scene transitions */
+          \t/* Cap >82ms transition stalls to 2200 frames (53ms) so scene loads never push ALSA into blocking */
 
           \tint16 *send_ptr = g_dac_buf;
 
           \tuint32 send_frames = out_frames;
 
-          \tif (send_frames > 7500U) {
+          \tif (send_frames > 3400U) {
 
-          \t\tuint32 trim = send_frames - 3200U;
+          \t\tuint32 trim = send_frames - 2200U;
 
           \t\tsend_ptr = g_dac_buf + (trim << 1);
 
-          \t\tsend_frames = 3200U;
+          \t\tsend_frames = 2200U;
 
           \t\tfor (uint32 k = 0; k < 32U; ++k) {
 
@@ -864,9 +862,9 @@ jobs:
 
           static bool g_ever = false, g_deb_pressed = false, g_in_pump = false;
 
-          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_vid_bucket_u = 0, g_vid_frame_u = 65800ULL, g_last_vid_decode_u = 0, g_last_aud_u = 0, g_blk_u = 0;
+          static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_vid_bucket_u = 0, g_vid_frame_u = 66000ULL, g_last_vid_decode_u = 0, g_last_aud_u = 0, g_blk_u = 0;
 
-          static unsigned int g_last_ms = 0, g_vid_rem = 0;
+          static unsigned int g_last_ms = 0, g_vid_rem = 0, g_aud_backoff = 0;
 
           static uint32_t g_scr_gen = 1, g_vid_gen = 0;
 
@@ -890,7 +888,7 @@ jobs:
 
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
 
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V40 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V41 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
 
               }
 
@@ -934,7 +932,7 @@ jobs:
 
               uint64_t u = leap_us();
 
-              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 20000ULL) {
+              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
 
                   g_in_pump = true;
 
@@ -953,8 +951,6 @@ jobs:
               g_scr_gen++;
 
               if (g_total_runs < 5) return 0;
-
-              leapster_pump_audio();
 
               uint64_t u = leap_us();
 
@@ -988,13 +984,13 @@ jobs:
 
               leap_open_log();
 
-              uint64_t fu = 65800ULL;
+              uint64_t fu = 66000ULL;
 
               if (ok && fcnt > 2U && dur_ms > 0U) {
 
                   uint64_t hdr = ((uint64_t)dur_ms * 1000ULL) / (uint64_t)fcnt;
 
-                  if (hdr < 65800ULL) fu = (hdr < 50000ULL) ? 50000ULL : hdr;
+                  if (hdr < 66000ULL) fu = (hdr < 50000ULL) ? 50000ULL : hdr;
 
               }
 
@@ -1026,7 +1022,9 @@ jobs:
 
               if (!g_vid_bucket_u) {
 
-                  g_vid_bucket_u = u;
+                  /* 25ms Frame-0 head-start pre-cushions SmackerAudioTrack before keyframe render */
+
+                  g_vid_bucket_u = (u > 25000ULL) ? (u - 25000ULL) : u;
 
                   leapster_pump_audio();
 
@@ -1068,7 +1066,11 @@ jobs:
 
               size_t sent = g_orig_aud(d, f);
 
-              g_blk_u += (leap_us() - t0);
+              uint64_t blk = leap_us() - t0;
+
+              g_blk_u += blk;
+
+              if (blk >= 1200ULL && g_total_runs >= 5U) g_aud_backoff = 18U;
 
               g_af += (uint32_t)sent;
 
@@ -1494,7 +1496,7 @@ jobs:
 
 
 
-      - name: Upload ScummVM Libretro Core V40
+      - name: Upload ScummVM Libretro Core V41
 
         if: always()
 
@@ -1502,7 +1504,7 @@ jobs:
 
         with:
 
-          name: scummvm_libretro_leapster_v40
+          name: scummvm_libretro_leapster_v41
 
           path: |
 
