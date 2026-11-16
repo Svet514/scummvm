@@ -298,13 +298,15 @@ jobs:
 
           snd_he_p = "engines/scumm/he/sound_he.cpp"
 
-          if os.path.exists(snd_he_p):
+          sht = open(snd_he_p, "r").read()
 
-              sht = open(snd_he_p, "r").read().replace('#include "common/scummsys.h"', '#include "common/scummsys.h"\nextern "C" void leapster_pump_audio(void);', 1)
+          sht, n_sh1 = re.subn(r"(namespace\s+Scumm\s*\{)", r'extern "C" void leapster_pump_audio(void);\n\1', sht, count=1)
 
-              sht = re.sub(r"(void\s+SoundHE::hsStartDigitalSound\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", sht, count=1)
+          sht, n_sh2 = re.subn(r"(void\s+SoundHE::hsStartDigitalSound\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", sht, count=1)
 
-              open(snd_he_p, "w").write(sht)
+          assert n_sh1 == 1 and n_sh2 == 1, f"Failed to patch sound_he.cpp: {n_sh1},{n_sh2}"
+
+          open(snd_he_p, "w").write(sht)
 
 
 
