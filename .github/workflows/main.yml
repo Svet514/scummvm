@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V45 (Streamlined Core - Direct 18ms Audio Yield + Zero Sample Chopping)
+name: Build ScummVM Libretro Core V46 (Zero Pause-Underrun + 14ms Pre-Decode Pump + Clean Load Guard)
 
 
 
@@ -218,7 +218,7 @@ jobs:
 
 
 
-          # 5a. Scoped HE .dat backslash fallback + 15.20 FPS Smacker pacer + direct 18ms audio pump
+          # 5a. Scoped HE .dat backslash fallback + 15.20 FPS Smacker pacer + direct 14ms audio pump
 
           anim_p = "engines/scumm/he/animation_he.cpp"
 
@@ -364,7 +364,7 @@ jobs:
 
 
 
-          # 6. 1:1 stylus input + 25FPS interactive updateScreen guard + direct 18ms audio pump in delayMillis
+          # 6. 1:1 stylus input + 25FPS interactive updateScreen guard + direct 14ms audio pump in delayMillis
 
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
 
@@ -556,7 +556,7 @@ jobs:
 
 
 
-          # 7. Clean 44100Hz -> 41155Hz Resampler (no boot prefill jam, zero active-sample chopping, 40ms idle-silence cap)
+          # 7. Clean 44100Hz -> 41155Hz Resampler (65ms pause-safe silence feed + 70400U cushion + >100ms load-only guard)
 
           cp = "backends/platform/libretro/src/libretro-core.cpp"
 
@@ -632,7 +632,7 @@ jobs:
 
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
 
-          \t\taudio_last_time_usec = now_usec - 16667;
+          \t\taudio_last_time_usec = now_usec - 20000;
 
           \t\taudio_samples_accumulator = 0.0f;
 
@@ -668,9 +668,9 @@ jobs:
 
           \t} else {
 
-          \t\t/* Cap synthesized dead silence at 40ms (1764 samples) so file-open stalls never clog ALSA with zeros */
+          \t\t/* Pass 100% of normal <=65ms speech pauses untouched so ALSA never XRUNs on word onsets */
 
-          \t\tin_frames = (samples_to_read > 1764U) ? 1764U : samples_to_read;
+          \t\tin_frames = (samples_to_read > 2866U) ? 2866U : samples_to_read;
 
           \t\tmemset(audio_sample_buffer, 0, in_frames * 2U * sizeof(int16));
 
@@ -678,19 +678,19 @@ jobs:
 
 
 
-          \tuint32 step_fp = 70320U;
+          \tuint32 step_fp = 70400U;
 
           \tif (g_aud_backoff > 0U) {
 
           \t\tg_aud_backoff--;
 
-          \t\tstep_fp = 71200U;
+          \t\tstep_fp = 71350U;
 
           \t}
 
           \tstatic uint32 s_rs_pos = 0;
 
-          \tstatic int s_prev_l = 0, s_prev_r = 0;
+          \tstatic int s_prev_l = 0, s_prev_r = 0, s_last_out_l = 0, s_last_out_r = 0;
 
           \tuint32 out_frames = 0;
 
@@ -730,13 +730,39 @@ jobs:
 
 
 
+          \t/* Guard strictly >100ms room/video-unload freezes (>4100 output frames); speech/songs stay <=3500 untouched */
+
+          \tint16 *send_ptr = g_dac_buf;
+
+          \tuint32 send_frames = out_frames;
+
+          \tif (send_frames > 4100U) {
+
+          \t\tuint32 trim = send_frames - 2400U;
+
+          \t\tsend_ptr = g_dac_buf + (trim << 1);
+
+          \t\tsend_frames = 2400U;
+
+          \t\tfor (uint32 k = 0; k < 32U; ++k) {
+
+          \t\t\tsend_ptr[k * 2U]     = (int16)((s_last_out_l * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
+
+          \t\t\tsend_ptr[k * 2U + 1] = (int16)((s_last_out_r * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
+
+          \t\t}
+
+          \t}
+
+          \ts_last_out_l = (int)send_ptr[(send_frames - 1U) * 2U];
+
+          \ts_last_out_r = (int)send_ptr[(send_frames - 1U) * 2U + 1U];
+
+
+
           \tav_status &= ~AUDIO_STATUS_MUTE;
 
           \tif (audio_batch_cb) {
-
-          \t\tint16 *send_ptr = g_dac_buf;
-
-          \t\tuint32 send_frames = out_frames;
 
           \t\twhile (send_frames > 0) {
 
@@ -844,7 +870,7 @@ jobs:
 
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
 
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V45 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V46 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
 
               }
 
@@ -888,7 +914,7 @@ jobs:
 
               uint64_t u = leap_us();
 
-              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
+              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 14000ULL) {
 
                   g_in_pump = true;
 
@@ -1024,7 +1050,7 @@ jobs:
 
               g_blk_u += blk;
 
-              if (blk >= 1500ULL && g_total_runs >= 5U) g_aud_backoff = 15U;
+              if (blk >= 1200ULL && g_total_runs >= 5U) g_aud_backoff = 16U;
 
               g_af += (uint32_t)sent;
 
@@ -1450,7 +1476,7 @@ jobs:
 
 
 
-      - name: Upload ScummVM Libretro Core V45
+      - name: Upload ScummVM Libretro Core V46
 
         if: always()
 
@@ -1458,7 +1484,7 @@ jobs:
 
         with:
 
-          name: scummvm_libretro_leapster_v45
+          name: scummvm_libretro_leapster_v46
 
           path: |
 
