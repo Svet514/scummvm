@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V44 (V39 Baseline + 22ms Audio Yield + Locked Timing)
+name: Build ScummVM Libretro Core V45 (Streamlined Core - Direct 18ms Audio Yield + Zero Sample Chopping)
 
 
 
@@ -180,7 +180,7 @@ jobs:
 
 
 
-          # 4. Standard DEFAULT_SAMPLE_RATE = 44100 + 16ms coroutine interval + lock timing_inaccuracies/speed_hack OFF + mute yellow OSD warnings
+          # 4. Standard DEFAULT_SAMPLE_RATE = 44100 + POINTER + lock speed_hack/timing_inaccuracies OFF + mute yellow OSD warnings
 
           defs_p = "backends/platform/libretro/include/libretro-defs.h"
 
@@ -189,20 +189,6 @@ jobs:
               dt = open(defs_p, "r").read()
 
               open(defs_p, "w").write(re.sub(r"(#define\s+DEFAULT_SAMPLE_RATE\s+)\d+", r"\g<1>44100", dt))
-
-
-
-          tmr_p = "backends/platform/libretro/src/libretro-timer.cpp"
-
-          if os.path.exists(tmr_p):
-
-              tt = open(tmr_p, "r").read()
-
-              tt = re.sub(r"_interval\s*\([^)]*\)", "_interval(16)", tt)
-
-              tt = re.sub(r"_interval\s*=\s*[^;]+;", "_interval = 16;", tt)
-
-              open(tmr_p, "w").write(tt)
 
 
 
@@ -232,7 +218,7 @@ jobs:
 
 
 
-          # 5a. Exact V39 HE video backslash fallback + 15.20 FPS Smacker audio-cushion pacer + mid-decode audio pump
+          # 5a. Scoped HE .dat backslash fallback + 15.20 FPS Smacker pacer + direct 18ms audio pump
 
           anim_p = "engines/scumm/he/animation_he.cpp"
 
@@ -304,7 +290,7 @@ jobs:
 
 
 
-          # 5b. Exact V39 MediaStation AudioSequence 260ms speaker-drain guard (for The Lion King final words)
+          # 5b. Scoped MediaStation AudioSequence 260ms speaker-drain guard
 
           ms_aud_p = "engines/mediastation/audio.cpp"
 
@@ -378,7 +364,7 @@ jobs:
 
 
 
-          # 6. V39 1:1 stylus input + V39 25FPS interactive updateScreen pacer + 22ms rate-limited audio yield in delayMillis
+          # 6. 1:1 stylus input + 25FPS interactive updateScreen guard + direct 18ms audio pump in delayMillis
 
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
 
@@ -494,9 +480,7 @@ jobs:
 
               'void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); '
 
-              'void leapster_os_delay(unsigned int ms); int leapster_should_yield_audio(void); }\n'
-
-              'extern void retro_switch_to_main_thread(void);\n'
+              'void leapster_os_delay(unsigned int ms); void leapster_pump_audio(void); }\n'
 
           )
 
@@ -548,23 +532,11 @@ jobs:
 
                           f"\tuint32 st = getMillis(), el = 0;\n"
 
-                          f"\tif ({p} == 0) {{\n"
-
-                          f"\t\tif (!{chk} && leapster_should_yield_audio()) retro_switch_to_main_thread();\n"
-
-                          f"\t\treturn;\n"
-
-                          f"\t}}\n"
+                          f"\tif ({p} == 0) {{ if (!{chk}) leapster_pump_audio(); return; }}\n"
 
                           f"\twhile (el < {p}) {{\n"
 
-                          f"\t\tif (!{chk}) {{\n"
-
-                          f"\t\t\tif (leapster_should_yield_audio()) retro_switch_to_main_thread();\n"
-
-                          f"\t\t\telse leapster_sleep_us(500);\n"
-
-                          f"\t\t}}\n"
+                          f"\t\tif (!{chk}) {{ leapster_pump_audio(); leapster_sleep_us(500); }}\n"
 
                           f"\t\tel = getMillis() - st;\n"
 
@@ -584,7 +556,7 @@ jobs:
 
 
 
-          # 7. Exact V39 44100Hz MixerImpl + 41% Equilibrium Cushion (70350U / 71200U) + V39 3900U->2500U Stall Cap
+          # 7. Clean 44100Hz -> 41155Hz Resampler (no boot prefill jam, zero active-sample chopping, 40ms idle-silence cap)
 
           cp = "backends/platform/libretro/src/libretro-core.cpp"
 
@@ -595,8 +567,6 @@ jobs:
           ct, n_sr1 = re.subn(r"sample_rate\s*=\s*atoi\(sample_rate_var\);", "sample_rate = 44100;", ct, count=1)
 
           ct, n_sr2 = re.subn(r"sample_rate\s*=\s*DEFAULT_SAMPLE_RATE;", "sample_rate = 44100;", ct, count=1)
-
-          ct, n_abuf = re.subn(r"(uint16\s+retro_setting_get_audio_samples_buffer_size\s*\(\s*void\s*\)\s*\{)", r"\1 return 2048;", ct, count=1)
 
 
 
@@ -620,7 +590,7 @@ jobs:
 
           \taudio_samples_per_frame   = frame_rate ? ((float)sample_rate / (float)frame_rate) : 882.0f;
 
-          \tuint32 audio_sample_buffer_size = 12288U * 2U * sizeof(int16);
+          \tuint32 audio_sample_buffer_size = 8192U * 2U * sizeof(int16);
 
           \taudio_sample_buffer = audio_sample_buffer ? (int16 *)realloc(audio_sample_buffer, audio_sample_buffer_size) : (int16 *)malloc(audio_sample_buffer_size);
 
@@ -662,33 +632,9 @@ jobs:
 
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
 
-          \t\taudio_last_time_usec = now_usec - 20000;
+          \t\taudio_last_time_usec = now_usec - 16667;
 
           \t\taudio_samples_accumulator = 0.0f;
-
-          \t\t/* Pre-fill 49ms (2000 stereo frames) so DMA starts cushioned near 41% ALSA fill without boot overflow */
-
-          \t\tif (audio_batch_cb) {
-
-          \t\t\tmemset(g_dac_buf, 0, 2000U * 2U * sizeof(int16));
-
-          \t\t\tint16 *pp = g_dac_buf;
-
-          \t\t\tuint32 rem = 2000U;
-
-          \t\t\twhile (rem > 0) {
-
-          \t\t\t\tuint32 ch = (rem > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : rem;
-
-          \t\t\t\taudio_batch_cb(pp, ch);
-
-          \t\t\t\trem -= ch;
-
-          \t\t\t\tpp += ch << 1;
-
-          \t\t\t}
-
-          \t\t}
 
           \t}
 
@@ -696,9 +642,7 @@ jobs:
 
           \taudio_last_time_usec = now_usec;
 
-          \tif (g_total_runs < 5 && delta_usec > 35000) delta_usec = 35000;
-
-          \tif (delta_usec > 240000) delta_usec = 240000;
+          \tif (delta_usec > 120000) delta_usec = 120000;
 
 
 
@@ -708,7 +652,7 @@ jobs:
 
           \taudio_samples_accumulator = samples_target - (float)samples_to_read;
 
-          \tif (samples_to_read > 11000U) samples_to_read = 11000U;
+          \tif (samples_to_read > 6000U) samples_to_read = 6000U;
 
           \tif (samples_to_read == 0) return;
 
@@ -724,7 +668,9 @@ jobs:
 
           \t} else {
 
-          \t\tin_frames = samples_to_read;
+          \t\t/* Cap synthesized dead silence at 40ms (1764 samples) so file-open stalls never clog ALSA with zeros */
+
+          \t\tin_frames = (samples_to_read > 1764U) ? 1764U : samples_to_read;
 
           \t\tmemset(audio_sample_buffer, 0, in_frames * 2U * sizeof(int16));
 
@@ -732,9 +678,7 @@ jobs:
 
 
 
-          \t/* Exact V39 70350U equilibrium cushion + 71200U instant backoff */
-
-          \tuint32 step_fp = 70350U;
+          \tuint32 step_fp = 70320U;
 
           \tif (g_aud_backoff > 0U) {
 
@@ -746,13 +690,13 @@ jobs:
 
           \tstatic uint32 s_rs_pos = 0;
 
-          \tstatic int s_prev_l = 0, s_prev_r = 0, s_last_out_l = 0, s_last_out_r = 0;
+          \tstatic int s_prev_l = 0, s_prev_r = 0;
 
           \tuint32 out_frames = 0;
 
           \tuint32 idx = s_rs_pos >> 16;
 
-          \twhile (idx < in_frames && out_frames < 11000U) {
+          \twhile (idx < in_frames && out_frames < 6000U) {
 
           \t\tuint32 frac = s_rs_pos & 0xFFFFU;
 
@@ -786,39 +730,13 @@ jobs:
 
 
 
-          \t/* Exact V39 >95ms room-load stall cap (22ms yielding keeps normal speech/video slices near ~1000-2200 frames) */
-
-          \tint16 *send_ptr = g_dac_buf;
-
-          \tuint32 send_frames = out_frames;
-
-          \tif (send_frames > 3900U) {
-
-          \t\tuint32 trim = send_frames - 2500U;
-
-          \t\tsend_ptr = g_dac_buf + (trim << 1);
-
-          \t\tsend_frames = 2500U;
-
-          \t\tfor (uint32 k = 0; k < 32U; ++k) {
-
-          \t\t\tsend_ptr[k * 2U]     = (int16)((s_last_out_l * (int)(32U - k) + (int)send_ptr[k * 2U] * (int)k) >> 5);
-
-          \t\t\tsend_ptr[k * 2U + 1] = (int16)((s_last_out_r * (int)(32U - k) + (int)send_ptr[k * 2U + 1] * (int)k) >> 5);
-
-          \t\t}
-
-          \t}
-
-          \ts_last_out_l = (int)send_ptr[(send_frames - 1U) * 2U];
-
-          \ts_last_out_r = (int)send_ptr[(send_frames - 1U) * 2U + 1U];
-
           \tav_status &= ~AUDIO_STATUS_MUTE;
 
-
-
           \tif (audio_batch_cb) {
+
+          \t\tint16 *send_ptr = g_dac_buf;
+
+          \t\tuint32 send_frames = out_frames;
 
           \t\twhile (send_frames > 0) {
 
@@ -838,7 +756,7 @@ jobs:
 
           ct = ct[:ar_s] + new_arun + ct[ar_e:]
 
-          assert n_sr0 == 1 and n_sr1 == 1 and n_sr2 == 1 and n_abuf == 1, f"Audio patch mismatch: {n_sr0},{n_sr1},{n_sr2},{n_abuf}"
+          assert n_sr0 == 1 and n_sr1 == 1 and n_sr2 == 1, f"Audio patch mismatch: {n_sr0},{n_sr1},{n_sr2}"
 
 
 
@@ -863,6 +781,8 @@ jobs:
           #include <linux/input.h>
 
           #include <sys/ioctl.h>
+
+          extern void retro_switch_to_main_thread(void);
 
           extern "C" {
 
@@ -906,7 +826,7 @@ jobs:
 
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
 
-          static int16_t g_dac_buf[12288 * 2];
+          static int16_t g_dac_buf[8192 * 2];
 
           static FILE *g_tfp = NULL;
 
@@ -918,15 +838,13 @@ jobs:
 
           static uint16_t g_d16[320 * 240];
 
-          /* Log to /tmp (tmpfs RAM disk) so NAND flash eraseblocks never stall gameplay */
-
           static void leap_open_log(void) {
 
               if (!g_tfp) {
 
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
 
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V44 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V45 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
 
               }
 
@@ -964,20 +882,6 @@ jobs:
 
           extern "C" void leapster_telem_click(void) { g_clicks++; g_scr_gen++; }
 
-          extern "C" int leapster_should_yield_audio(void) {
-
-              if (g_in_pump || g_total_runs < 5) return 0;
-
-              uint64_t u = leap_us();
-
-              if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 22000ULL)
-
-                  return 1;
-
-              return 0;
-
-          }
-
           extern "C" void leapster_pump_audio(void) {
 
               if (g_in_pump || g_total_runs < 5) return;
@@ -988,7 +892,7 @@ jobs:
 
                   g_in_pump = true;
 
-                  leapster_os_delay(0);
+                  retro_switch_to_main_thread();
 
                   g_in_pump = false;
 
@@ -1546,7 +1450,7 @@ jobs:
 
 
 
-      - name: Upload ScummVM Libretro Core V44
+      - name: Upload ScummVM Libretro Core V45
 
         if: always()
 
@@ -1554,7 +1458,7 @@ jobs:
 
         with:
 
-          name: scummvm_libretro_leapster_v44
+          name: scummvm_libretro_leapster_v45
 
           path: |
 
