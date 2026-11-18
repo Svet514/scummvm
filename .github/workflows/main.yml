@@ -278,8 +278,11 @@ jobs:
           raw_hdr = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
           #include <stdlib.h>
           #include <string.h>
+          #include "common/array.h"
           #include "common/endian.h"
           #include "common/memstream.h"
+          #include "audio/audiostream.h"
+          #include "audio/decoders/raw.h"
           #include "audio/decoders/vorbis.h"
 
           namespace Audio {
@@ -555,7 +558,7 @@ jobs:
           # 4. Patch audio/decoders/wave.cpp so RIFF->OggS in .he4 or .he2 passed to makeWAVStream decodes cleanly via Tremor!
           wav_p = "audio/decoders/wave.cpp"
           if os.path.exists(wav_p):
-              wav_t = '#define FORBIDDEN_SYMBOL_ALLOW_ALL\n#include <stdlib.h>\n#include "common/endian.h"\n#include "common/memstream.h"\n#include "audio/decoders/vorbis.h"\n' + open(wav_p, "r").read()
+              wav_t = '#define FORBIDDEN_SYMBOL_ALLOW_ALL\n#include <stdlib.h>\n#include "common/endian.h"\n#include "common/memstream.h"\n#include "audio/audiostream.h"\n#include "audio/decoders/wave.h"\n#include "audio/decoders/vorbis.h"\n' + open(wav_p, "r").read()
               wav_t, _ = re.subn(
                   r"(RewindableAudioStream\s*\*\s*makeWAVStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)\s*\)\s*\{)",
                   r"""\1
