@@ -65,12 +65,14 @@ jobs:
           if os.path.exists(ssys):
               stxt = open(ssys, errors="ignore").read()
               defs_inj = (
-                  '\1\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif\n'
+                  r'\1' + '\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif\n'
                   '#ifndef USE_TREMOR\n#define USE_TREMOR 1\n#endif\n'
                   '#ifndef USE_VORBIS\n#define USE_VORBIS 1\n#endif\n'
                   '#ifndef USE_OGG\n#define USE_OGG 1\n#endif'
               )
-              open(ssys, "w").write(re.sub(r'(#include\s+"config\.h")', defs_inj, stxt, count=1))
+              stxt, n_ss = re.subn(r'(#include\s+"config\.h")', defs_inj, stxt, count=1)
+              assert n_ss == 1 and len(stxt) > 1000, "Failed to patch common/scummsys.h"
+              open(ssys, "w").write(stxt)
 
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_FLAC", "USE_MAD", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
@@ -82,14 +84,20 @@ jobs:
                   t = re.sub(r"\bUSE_OGG\s*[:?]?=\s*0\b", "USE_OGG := 1", t)
                   open(mr, "w").write(t)
 
-          vp = "|".join(dis)
+          vp = "|".join(v for v in dis if v != "USE_VORBIS")
           id_re, in_re = re.compile(rf"^(\s*)ifdef\s+({vp})\s*$", flags=re.M), re.compile(rf"^(\s*)ifndef\s+({vp})\s*$", flags=re.M)
+          vorb_id_re, vorb_in_re = re.compile(r"^(\s*)ifdef\s+USE_VORBIS\s*$", flags=re.M), re.compile(r"^(\s*)ifndef\s+USE_VORBIS\s*$", flags=re.M)
           for root, _, files in os.walk("."):
+              in_lr = "backends/platform/libretro" in root.replace("\\", "/")
               for fn in files:
                   if fn.endswith(".mk") or fn in ("Makefile", "Makefile.common"):
                       fp = os.path.join(root, fn)
                       mt = open(fp, errors="ignore").read()
                       nm = in_re.sub(r"\1ifneq ($(\2), 1)", id_re.sub(r"\1ifeq ($(\2), 1)", mt))
+                      # Keep USE_VORBIS=0 in libretro dependencies.mk (no float libvorbis),
+                      # but enable decoders/vorbis.o in audio/module.mk when USE_TREMOR=1
+                      vvar = "USE_VORBIS" if in_lr else "USE_TREMOR"
+                      nm = vorb_in_re.sub(rf"\1ifneq ($({vvar}), 1)", vorb_id_re.sub(rf"\1ifeq ($({vvar}), 1)", nm))
                       if nm != mt: open(fp, "w").write(nm)
 
           csh = "backends/platform/libretro/scripts/configure_engines.sh"
@@ -244,10 +252,6 @@ jobs:
           \t\treturn true;
           \t}"""
 
-          # Self-heal \x01 if non-raw '\1' ran in Step 3
-          if os.path.exists("common/scummsys.h"):
-              open("common/scummsys.h", "w").write(open("common/scummsys.h", errors="ignore").read().replace("\x01", '#include "config.h"'))
-
           smk_t = lvd_classes + smk_t.replace("namespace Video {", smk_track_defs, 1)
           smk_t, n_sl = re.subn(r"_header\.signature\s*=\s*_fileStream->readUint32BE\(\);", lambda _: lvd_load_hook, smk_t, count=1)
           smk_t, n_sr = re.subn(r"(void\s+SmackerDecoder::readNextPacket\s*\(\s*\)\s*\{)", r"\1 if (_header.signature == MKTAG('L', 'V', 'D', '1')) return;", smk_t, count=1)
@@ -277,12 +281,13 @@ jobs:
 
           snd_he_p = "engines/scumm/he/sound_he.cpp"
           snd_he_t = open(snd_he_p, "r").read()
-          tli_helper = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
+          tli_inc = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
           #include <stdio.h>
           #include <dirent.h>
           #include <strings.h>
           #include "common/config-manager.h"
-          namespace Scumm {
+          """
+          tli_ns = """namespace Scumm {
           struct LeapTliEntry { uint32 oldOff, newOff, newLen; };
           static LeapTliEntry *s_tli = nullptr;
           static uint32 s_tliCount = 0;
@@ -328,7 +333,8 @@ jobs:
           \telse if (delta < s_tli[lo].newLen) { off = s_tli[lo].newOff + delta; if (plen) *plen = s_tli[lo].newLen - delta; }
           }
           """
-          snd_he_t = tli_helper + snd_he_t.replace("namespace Scumm {", "", 1)
+          assert "namespace Scumm {" in snd_he_t, "Missing namespace Scumm in sound_he.cpp"
+          snd_he_t = tli_inc + snd_he_t.replace("namespace Scumm {", tli_ns, 1)
           snd_he_t, n_pv = re.subn(r"(void\s+SoundHE::playVoice\s*\(\s*uint32\s+(\w+)\s*,\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, &\3);", snd_he_t, count=1)
           snd_he_t, n_st = re.subn(r"(void\s+SoundHE::startHETalkSound\s*\(\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, nullptr);", snd_he_t, count=1)
           assert (n_pv + n_st) >= 1, f"Failed to patch sound_he.cpp: {n_pv},{n_st}"
@@ -348,9 +354,10 @@ jobs:
               '\tauto s = v->decodeNextFrame();\n'
               '\tleapster_pump_audio();\n'
               '\treturn s;\n'
-              '}'
+              '}\n'
           )
-          anim_t = open(anim_p, "r").read().replace('#include "common/scummsys.h"', anim_hdr, 1)
+          anim_t, n_ah = re.subn(r'(\bnamespace\s+Scumm\s*\{)', lambda m: anim_hdr + m.group(1), open(anim_p, "r").read(), count=1)
+          assert n_ah == 1, "Failed to inject anim_hdr into animation_he.cpp"
           anim_fix = """
               leapster_pump_audio();
               static bool s_dirIndexed = false;
