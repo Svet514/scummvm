@@ -1,736 +1,1487 @@
 name: Build ScummVM Libretro Core V48 (LVD1 320x240 Video + Tremor Ogg Audio + V47 Pacing)
 
+
+
 on:
+
   push:
+
     branches: [ "main", "master" ]
+
   workflow_dispatch:
 
+
+
 concurrency:
+
   group: scummvm-build-${{ github.ref }}
+
   cancel-in-progress: true
 
+
+
 jobs:
+
   build:
+
     runs-on: ubuntu-24.04
 
+
+
     steps:
+
       - name: Clone & Patch ScummVM v2026.4.0
+
         run: |
+
           rm -rf scummvm-2026.4.0
+
           git clone --depth 1 --branch v2026.4.0 https://github.com/scummvm/scummvm.git scummvm-2026.4.0
+
           cd scummvm-2026.4.0
 
+
+
           python3 - << 'EOF'
+
           import os, re
 
+
+
           # 1. Enable scumm, scumm_7_8, he, and mediastation
+
           for name in ["lite_engines.list", "engines.lite"]:
+
               with open(os.path.join("backends/platform/libretro", name), "w") as f:
+
                   f.write("scumm\nscumm_7_8\nhe\nmediastation\n")
+
           ms_cfg = "engines/mediastation/configure.engine"
+
           if os.path.exists(ms_cfg):
+
               mtxt = open(ms_cfg, "r").read()
+
               open(ms_cfg, "w").write(re.sub(r'\badd_engine\s+mediastation\s+"([^"]+)"\s+\w+', r'add_engine mediastation "\1" yes', mtxt))
 
+
+
           # 2. Generic detection unlock + auto-accept unsupported/repacked game warning
+
           adv = "engines/advancedDetector.cpp"
+
           at = open(adv, errors="ignore").read()
+
           at = re.sub(r"\breturn\s+matched\s*;", "{ for (uint _i = 0; _i < matched.size(); ++_i) matched[_i].hasUnknownFiles = false; return matched; }", at)
+
           at = re.sub(r"(\bhasUnknownFiles\s*=\s*)adGame\.hasUnknownFiles\b", r"\1false", at)
+
           at = re.sub(r"(bool\s+cleanupPirated\s*\([^)]*\)\s*\{)", r"\1 return false;", at)
+
           open(adv, "w").write(at)
 
+
+
           for sdir in ["engines", "gui", "base"]:
+
               for root, _, files in os.walk(sdir):
+
                   for fn in files:
+
                       if not fn.endswith((".cpp", ".h")): continue
+
                       fp = os.path.join(root, fn)
+
                       t = open(fp, errors="ignore").read()
+
                       nt = re.sub(r"(bool\s+(?:[A-Za-z0-9_]+::)?warnUserAboutUnsupportedGame\s*\([^)]*\)\s*\{)", r"\1 return true;", t)
+
                       if fn == "launcher.cpp": nt = re.sub(r"\b(\w+(?:\[\w+\])?)\.hasUnknownFiles\b", "false", nt)
+
                       if "detection" in fn and ("ADGF_UNSTABLE" in nt or "ADGF_TESTING" in nt):
+
                           nt = re.sub(r"\bADGF_(?:UNSTABLE|TESTING)\b", "0", nt)
+
                       if nt != t: open(fp, "w").write(nt)
 
+
+
           # 3. Enable USE_BINK=1 + USE_TREMOR=1 + USE_OGG=1 (static integer Ogg Vorbis) while disabling unused libs
+
           for mk in ["backends/imgui/module.mk", "backends/networking/basic/module.mk", "backends/networking/curl/module.mk", "backends/networking/http/module.mk", "backends/networking/sdl_net/module.mk", "backends/cloud/module.mk"]:
+
               if os.path.exists(mk): open(mk, "w").write("# Disabled\n")
+
           if os.path.exists("configure"):
+
               cfg = open("configure", errors="ignore").read()
+
               cfg = re.sub(r"^\s*add_component\s+imgui\b.*$", "# disabled imgui", cfg, flags=re.M)
+
               cfg = re.sub(r"^([ \t]*_bink=).*$", r"\1yes", cfg, flags=re.M)
+
               open("configure", "w").write(cfg)
 
+
+
           ssys = "common/scummsys.h"
+
           if os.path.exists(ssys):
+
               stxt = open(ssys, errors="ignore").read()
+
               defs_inj = (
+
                   r'\1' + '\n#ifndef USE_BINK\n#define USE_BINK 1\n#endif\n'
+
                   '#ifndef USE_TREMOR\n#define USE_TREMOR 1\n#endif\n'
+
                   '#ifndef USE_VORBIS\n#define USE_VORBIS 1\n#endif\n'
+
                   '#ifndef USE_OGG\n#define USE_OGG 1\n#endif'
+
               )
+
               stxt, n_ss = re.subn(r'(#include\s+"config\.h")', defs_inj, stxt, count=1)
+
               assert n_ss == 1 and len(stxt) > 1000, "Failed to patch common/scummsys.h"
+
               open(ssys, "w").write(stxt)
 
+
+
           dis = ["USE_IMGUI", "USE_CURL", "USE_LIBCURL", "USE_CLOUD", "USE_BASIC_NET", "USE_SDL_NET", "USE_ALSA", "USE_SEQ_MIDI", "USE_SNDIO", "USE_TIMIDITY", "USE_FLUIDSYNTH", "USE_MT32EMU", "USE_FREETYPE2", "USE_FRIBIDI", "USE_MPEG2", "USE_THEORADEC", "USE_VPX", "USE_FAAD", "USE_AAC", "USE_VORBIS", "USE_FLAC", "USE_MAD", "USE_MPCDEC", "USE_OPENMPT", "USE_MIKMOD", "USE_TTS", "USE_DISCORD", "USE_RETROACHIEVEMENTS", "USE_GTK", "USE_SYSDIALOGS", "USE_UNITY", "OPENGL_SUPPORT", "USE_OPENGL", "HAVE_OPENGL"]
+
           for mr in ["backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common", "backends/platform/libretro/dependencies.mk"]:
+
               if os.path.exists(mr):
+
                   t = re.sub(r"SHARED_([A-Z0-9_]+)\s*:?=\s*1", r"SHARED_\1 := 0", open(mr, "r").read())
+
                   for v in dis: t = re.sub(rf"\b{v}\s*[:?]?=\s*1\b", f"{v} := 0", t)
+
                   t = re.sub(r"\bUSE_BINK\s*[:?]?=\s*0\b", "USE_BINK := 1", t)
+
                   t = re.sub(r"\bUSE_TREMOR\s*[:?]?=\s*0\b", "USE_TREMOR := 1", t)
+
                   t = re.sub(r"\bUSE_OGG\s*[:?]?=\s*0\b", "USE_OGG := 1", t)
+
                   open(mr, "w").write(t)
 
+
+
           vp = "|".join(v for v in dis if v != "USE_VORBIS")
+
           id_re, in_re = re.compile(rf"^(\s*)ifdef\s+({vp})\s*$", flags=re.M), re.compile(rf"^(\s*)ifndef\s+({vp})\s*$", flags=re.M)
+
           vorb_id_re, vorb_in_re = re.compile(r"^(\s*)ifdef\s+USE_VORBIS\s*$", flags=re.M), re.compile(r"^(\s*)ifndef\s+USE_VORBIS\s*$", flags=re.M)
+
           for root, _, files in os.walk("."):
+
               in_lr = "backends/platform/libretro" in root.replace("\\", "/")
+
               for fn in files:
+
                   if fn.endswith(".mk") or fn in ("Makefile", "Makefile.common"):
+
                       fp = os.path.join(root, fn)
+
                       mt = open(fp, errors="ignore").read()
+
                       nm = in_re.sub(r"\1ifneq ($(\2), 1)", id_re.sub(r"\1ifeq ($(\2), 1)", mt))
+
                       # Keep USE_VORBIS=0 in libretro dependencies.mk (no float libvorbis),
+
                       # but enable decoders/vorbis.o in audio/module.mk when USE_TREMOR=1
+
                       vvar = "USE_VORBIS" if in_lr else "USE_TREMOR"
+
                       nm = vorb_in_re.sub(rf"\1ifneq ($({vvar}), 1)", vorb_id_re.sub(rf"\1ifeq ($({vvar}), 1)", nm))
+
                       if nm != mt: open(fp, "w").write(nm)
 
+
+
           csh = "backends/platform/libretro/scripts/configure_engines.sh"
+
           if os.path.exists(csh):
+
               st = open(csh, "r").read().replace("--disable-bink", "--enable-bink").replace("--disable-tremor", "--enable-tremor").replace("--disable-vorbis", "--enable-tremor")
+
               for fl in ["libcurl", "cloud", "basic-net", "alsa"]: st = st.replace(f"--enable-{fl}", f"--disable-{fl}")
+
               open(csh, "w").write(st)
 
+
+
           # 4. 44100Hz + POINTER + lock timing_inaccuracies/speed_hack OFF + mute yellow OSD warnings
+
           defs_p = "backends/platform/libretro/include/libretro-defs.h"
+
           if os.path.exists(defs_p):
+
               dt = open(defs_p, "r").read()
+
               open(defs_p, "w").write(re.sub(r"(#define\s+DEFAULT_SAMPLE_RATE\s+)\d+", r"\g<1>44100", dt))
 
+
+
           for root, _, files in os.walk("backends/platform/libretro"):
+
               for fn in files:
+
                   if not fn.endswith((".cpp", ".h")): continue
+
                   fp = os.path.join(root, fn)
+
                   st = open(fp, errors="ignore").read()
+
                   ns = re.sub(r"(int\s+retro_setting_get_pointer_device\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return RETRO_DEVICE_POINTER;", st)
+
                   ns = re.sub(r"(bool\s+retro_setting_get_timing_inaccuracies_enabled\s*\(\s*(?:void)?\s*\)\s*\{)", r"\1 return false;", ns)
+
                   ns = re.sub(r"(void\s+retro_osd_notification\s*\([^)]*\)\s*\{)", r"\1 return;", ns)
+
                   ns = ns.replace("pointer_device = RETRO_DEVICE_JOYPAD", "pointer_device = RETRO_DEVICE_POINTER")
+
                   ns = ns.replace("pointer_device = RETRO_DEVICE_MOUSE", "pointer_device = RETRO_DEVICE_POINTER")
+
                   if ns != st: open(fp, "w").write(ns)
 
+
+
           # 5a. LVD1 320x240 Paletted XOR-Delta Zlib + Ogg Decoder inside video/smk_decoder.cpp (with full SMK2/SMK4 fallback)
+
+          vd_p = "video/video_decoder.h"
+
+          vd_t, n_vd = re.subn(
+
+              r"(class\s+VideoDecoder\b[^;{]*\{)",
+
+              r"\1\n\tfriend class LeapLvdAudioTrack;\n\tfriend class LeapLvdVideoTrack;",
+
+              open(vd_p, "r").read(), count=1
+
+          )
+
+          assert n_vd == 1, "Failed to patch video/video_decoder.h"
+
+          open(vd_p, "w").write(vd_t)
+
+
+
           smk_p = "video/smk_decoder.cpp"
+
           smk_t = open(smk_p, "r").read()
+
           lvd_classes = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
+
           #include <zlib.h>
+
           #include "common/memstream.h"
+
           #include "audio/audiostream.h"
+
           #include "audio/decoders/vorbis.h"
+
           """
+
           smk_track_defs = """namespace Video {
 
+
+
           class LeapLvdAudioTrack : public VideoDecoder::AudioTrack {
+
           \tAudio::AudioStream *_stream;
+
           public:
+
           \tLeapLvdAudioTrack(Audio::AudioStream *s, Audio::Mixer::SoundType t) : AudioTrack(t), _stream(s) {}
+
           \t~LeapLvdAudioTrack() override { delete _stream; }
+
           protected:
+
           \tAudio::AudioStream *getAudioStream() const override { return _stream; }
+
           };
+
+
 
           class LeapLvdVideoTrack : public VideoDecoder::FixedRateVideoTrack {
+
           \tCommon::SeekableReadStream *_stream;
+
           \tuint16 _origW, _origH, _encW, _encH;
+
           \tuint32 _frameCount, _frameUs;
+
           \tint _curFrame;
+
           \tCommon::Array<uint32> _offsets;
+
           \tCommon::Array<byte> _idxBuf, _compBuf, _unpBuf;
+
           \tGraphics::Surface _surface;
+
           \tbyte _palette[3 * 256];
+
           \tmutable bool _dirtyPalette;
+
           public:
+
           \tLeapLvdVideoTrack(Common::SeekableReadStream *s, uint16 ow, uint16 oh, uint16 ew, uint16 eh, uint32 fc, uint32 fu, const Common::Array<uint32> &offs)
+
           \t\t: _stream(s), _origW(ow), _origH(oh), _encW(ew), _encH(eh), _frameCount(fc), _frameUs(fu ? fu : 66667U), _curFrame(-1), _offsets(offs), _dirtyPalette(false) {
+
           \t\tmemset(_palette, 0, sizeof(_palette));
+
           \t\t_surface.create(_origW, _origH, Graphics::PixelFormat::createFormatCLUT8());
+
           \t\t_idxBuf.resize((uint32)_encW * (uint32)_encH, 0);
+
           \t\t_unpBuf.resize(1U + 768U + (uint32)_encW * (uint32)_encH + 64U, 0);
+
           \t}
+
           \t~LeapLvdVideoTrack() override { _surface.free(); }
+
           \tuint16 getWidth() const override { return _origW; }
+
           \tuint16 getHeight() const override { return _origH; }
+
           \tGraphics::PixelFormat getPixelFormat() const override { return Graphics::PixelFormat::createFormatCLUT8(); }
+
           \tint getCurFrame() const override { return _curFrame; }
+
           \tint getFrameCount() const override { return (int)_frameCount; }
+
           \tbool isRewindable() const override { return true; }
+
           \tbool rewind() override { _curFrame = -1; memset(_idxBuf.data(), 0, _idxBuf.size()); return true; }
+
           \tconst byte *getPalette() const override { _dirtyPalette = false; return _palette; }
+
           \tbool hasDirtyPalette() const override { return _dirtyPalette; }
+
           \tconst Graphics::Surface *decodeNextFrame() override {
+
           \t\tif (_curFrame + 1 >= (int)_frameCount) return &_surface;
+
           \t\t_curFrame++;
+
           \t\tuint32 off0 = _offsets[_curFrame], off1 = _offsets[_curFrame + 1];
+
           \t\tuint32 csz = (off1 > off0) ? (off1 - off0) : 0;
+
           \t\tif (csz > 0 && _stream) {
+
           \t\t\tif (_compBuf.size() < csz) _compBuf.resize(csz);
+
           \t\t\t_stream->seek(off0, SEEK_SET);
+
           \t\t\tif (_stream->read(_compBuf.data(), csz) == csz) {
+
           \t\t\t\tuLongf ulen = (uLongf)_unpBuf.size();
+
           \t\t\t\tif (uncompress((Bytef *)_unpBuf.data(), &ulen, (const Bytef *)_compBuf.data(), (uLong)csz) == Z_OK && ulen >= 1) {
+
           \t\t\t\t\tbyte pf = _unpBuf[0];
+
           \t\t\t\t\tuint32 pos = 1;
+
           \t\t\t\t\tif ((pf & 1) && pos + 768U <= ulen) {
+
           \t\t\t\t\t\tmemcpy(_palette, _unpBuf.data() + pos, 768U);
+
           \t\t\t\t\t\tpos += 768U;
+
           \t\t\t\t\t\t_dirtyPalette = true;
+
           \t\t\t\t\t}
+
           \t\t\t\t\tuint32 npix = (uint32)_encW * (uint32)_encH;
+
           \t\t\t\t\tif (pos + npix <= ulen) {
+
           \t\t\t\t\t\tif (pf & 2) {
+
           \t\t\t\t\t\t\tmemcpy(_idxBuf.data(), _unpBuf.data() + pos, npix);
+
           \t\t\t\t\t\t} else {
+
           \t\t\t\t\t\t\tconst byte *dl = _unpBuf.data() + pos;
+
           \t\t\t\t\t\t\tbyte *ix = _idxBuf.data();
+
           \t\t\t\t\t\t\tfor (uint32 i = 0; i < npix; ++i) ix[i] ^= dl[i];
+
           \t\t\t\t\t\t}
+
           \t\t\t\t\t}
+
           \t\t\t\t\tif (_origW == _encW * 2 && _origH == _encH * 2) {
+
           \t\t\t\t\t\tfor (uint16 y = 0; y < _encH; ++y) {
+
           \t\t\t\t\t\t\tconst byte *sr = _idxBuf.data() + (uint32)y * _encW;
+
           \t\t\t\t\t\t\tbyte *d0 = (byte *)_surface.getBasePtr(0, y * 2);
+
           \t\t\t\t\t\t\tbyte *d1 = (byte *)_surface.getBasePtr(0, y * 2 + 1);
+
           \t\t\t\t\t\t\tfor (uint16 x = 0; x < _encW; ++x) {
+
           \t\t\t\t\t\t\t\tbyte c = sr[x];
+
           \t\t\t\t\t\t\t\td0[x * 2] = c;
+
           \t\t\t\t\t\t\t\td0[x * 2 + 1] = c;
+
           \t\t\t\t\t\t\t}
+
           \t\t\t\t\t\t\tmemcpy(d1, d0, _origW);
+
           \t\t\t\t\t\t}
+
           \t\t\t\t\t} else if (_origW == _encW && _origH == _encH) {
+
           \t\t\t\t\t\tfor (uint16 y = 0; y < _encH; ++y)
+
           \t\t\t\t\t\t\tmemcpy(_surface.getBasePtr(0, y), _idxBuf.data() + (uint32)y * _encW, _encW);
+
           \t\t\t\t\t}
+
           \t\t\t\t}
+
           \t\t\t}
+
           \t\t}
+
           \t\treturn &_surface;
+
           \t}
+
           protected:
+
           \tCommon::Rational getFrameRate() const override { return Common::Rational(1000000, (int)_frameUs); }
+
           };
+
           """
+
           lvd_load_hook = """_header.signature = _fileStream->readUint32BE();
+
           \tif (_header.signature == MKTAG('L', 'V', 'D', '1')) {
+
           \t\tuint16 origW = _fileStream->readUint16LE();
+
           \t\tuint16 origH = _fileStream->readUint16LE();
+
           \t\tuint16 encW  = _fileStream->readUint16LE();
+
           \t\tuint16 encH  = _fileStream->readUint16LE();
+
           \t\tuint32 fcnt  = _fileStream->readUint32LE();
+
           \t\tuint32 fus   = _fileStream->readUint32LE();
+
           \t\tuint32 olen  = _fileStream->readUint32LE();
+
           \t\tif (fcnt == 0 || fcnt > 100000U) return false;
+
           \t\tCommon::Array<uint32> offs(fcnt + 1U);
+
           \t\tfor (uint32 i = 0; i <= fcnt; ++i) offs[i] = _fileStream->readUint32LE();
+
           \t\t_firstFrameStart = offs[0];
+
           \t\taddTrack(new LeapLvdVideoTrack(_fileStream, origW, origH, encW, encH, fcnt, fus, offs));
+
           \t\tif (olen > 0U) {
+
           \t\t\tbyte *obuf = (byte *)malloc(olen);
+
           \t\t\tif (obuf && _fileStream->read(obuf, olen) == olen) {
+
           \t\t\t\tCommon::SeekableReadStream *ms = new Common::MemoryReadStream(obuf, olen, DisposeAfterUse::YES);
+
           \t\t\t\tAudio::RewindableAudioStream *vs = Audio::makeVorbisStream(ms, DisposeAfterUse::YES);
+
           \t\t\t\tif (vs) addTrack(new LeapLvdAudioTrack(vs, getSoundType()));
+
           \t\t\t} else {
+
           \t\t\t\tfree(obuf);
+
           \t\t\t}
+
           \t\t}
+
           \t\treturn true;
+
           \t}"""
 
+
+
           smk_t = lvd_classes + smk_t.replace("namespace Video {", smk_track_defs, 1)
+
           smk_t, n_sl = re.subn(r"_header\.signature\s*=\s*_fileStream->readUint32BE\(\);", lambda _: lvd_load_hook, smk_t, count=1)
+
           smk_t, n_sr = re.subn(r"(void\s+SmackerDecoder::readNextPacket\s*\(\s*\)\s*\{)", r"\1 if (_header.signature == MKTAG('L', 'V', 'D', '1')) return;", smk_t, count=1)
+
           smk_t, n_sf = re.subn(
+
               r"(const\s+Graphics::Surface\s*\*\s*SmackerDecoder::forceSeekToFrame\s*\(\s*uint\s+(\w+)\s*\)\s*\{)",
+
               r"\1 if (_header.signature == MKTAG('L', 'V', 'D', '1')) { if (!isVideoLoaded() || \2 >= getFrameCount() || !rewind()) return nullptr; const Graphics::Surface *_s = nullptr; for (uint _i = 0; _i <= \2; ++_i) _s = decodeNextFrame(); return _s; }",
+
               smk_t, count=1
+
           )
+
           assert n_sl == 1 and n_sr == 1, f"Failed to patch smk_decoder.cpp: {n_sl},{n_sr},{n_sf}"
+
           open(smk_p, "w").write(smk_t)
 
+
+
           # 5b. Auto-decode OggS inside SDAT/makeRawStream (covers .he2, .he4, and room sounds) + .tli talkie offset map
+
           raw_p = "audio/decoders/raw.cpp"
+
           raw_t = '#define FORBIDDEN_SYMBOL_ALLOW_ALL\n#include "common/endian.h"\n#include "common/memstream.h"\n#include "audio/decoders/vorbis.h"\n' + open(raw_p, "r").read()
+
           raw_t, n_rw1 = re.subn(
+
               r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*int\s+\w+\s*,\s*byte\s+\w+\s*,\s*DisposeAfterUse::Flag\s+(\w+)\s*\)\s*\{)",
+
               r"\1\n\tif (\2 && (\2->size() - \2->pos()) >= 28) { int64 _p0 = \2->pos(); uint32 _mg = \2->readUint32BE(); \2->seek(_p0, SEEK_SET); if (_mg == MKTAG('O','g','g','S')) { SeekableAudioStream *_vs = makeVorbisStream(\2, \3); if (_vs) return _vs; } }",
+
               raw_t, count=1
+
           )
+
           raw_t, n_rw2 = re.subn(
+
               r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*const\s+byte\s*\*\s*(\w+)\s*,\s*(?:uint32|int)\s+(\w+)\s*,\s*int\s+\w+\s*,\s*byte\s+\w+\s*,\s*DisposeAfterUse::Flag\s+(\w+)\s*\)\s*\{)",
+
               r"\1\n\tif (\2 && \3 >= 28 && READ_BE_UINT32(\2) == MKTAG('O','g','g','S')) { byte *_ob = (byte *)malloc(\3); if (_ob) { memcpy(_ob, \2, \3); if (\4 == DisposeAfterUse::YES) free(const_cast<byte *>(\2)); SeekableAudioStream *_vs = makeVorbisStream(new Common::MemoryReadStream(_ob, \3, DisposeAfterUse::YES), DisposeAfterUse::YES); if (_vs) return _vs; } }",
+
               raw_t, count=1
+
           )
+
           assert n_rw1 == 1, f"Failed to patch raw.cpp: {n_rw1},{n_rw2}"
+
           open(raw_p, "w").write(raw_t)
 
+
+
           snd_he_p = "engines/scumm/he/sound_he.cpp"
+
           snd_he_t = open(snd_he_p, "r").read()
+
           tli_inc = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
+
           #include <stdio.h>
+
           #include <dirent.h>
+
           #include <strings.h>
+
           #include "common/config-manager.h"
+
           """
+
           tli_ns = """namespace Scumm {
+
           struct LeapTliEntry { uint32 oldOff, newOff, newLen; };
+
           static LeapTliEntry *s_tli = nullptr;
+
           static uint32 s_tliCount = 0;
+
           static Common::String s_tliDir;
+
           static void leapLoadTliIfNeeded() {
+
           \tif (!ConfMan.hasKey("path")) return;
+
           \tCommon::String curDir = ConfMan.getPath("path").toString('/');
+
           \tif (curDir == s_tliDir) return;
+
           \ts_tliDir = curDir;
+
           \tfree(s_tli); s_tli = nullptr; s_tliCount = 0;
+
           \tDIR *d = opendir(curDir.c_str());
+
           \tif (!d) return;
+
           \tstruct dirent *de;
+
           \twhile ((de = readdir(d)) != nullptr) {
+
           \t\tsize_t nl = strlen(de->d_name);
+
           \t\tif (nl > 4 && strcasecmp(de->d_name + nl - 4, ".tli") == 0) {
+
           \t\t\tCommon::String fp = curDir + "/" + de->d_name;
+
           \t\t\tFILE *f = fopen(fp.c_str(), "rb");
+
           \t\t\tif (f) {
+
           \t\t\t\tchar mg[4]; uint32 cnt = 0;
+
           \t\t\t\tif (fread(mg, 1, 4, f) == 4 && memcmp(mg, "TLKI", 4) == 0 && fread(&cnt, 4, 1, f) == 1 && cnt > 0 && cnt < 200000U) {
+
           \t\t\t\t\ts_tli = (LeapTliEntry *)malloc(cnt * sizeof(LeapTliEntry));
+
           \t\t\t\t\tif (s_tli && fread(s_tli, sizeof(LeapTliEntry), cnt, f) == cnt) s_tliCount = cnt;
+
           \t\t\t\t\telse { free(s_tli); s_tli = nullptr; }
+
           \t\t\t\t}
+
           \t\t\t\tfclose(f);
+
           \t\t\t}
+
           \t\t\tbreak;
+
           \t\t}
+
           \t}
+
           \tclosedir(d);
+
           }
+
           static void leapMapTli(uint32 &off, uint32 *plen) {
+
           \tleapLoadTliIfNeeded();
+
           \tif (!s_tli || s_tliCount == 0 || off < s_tli[0].oldOff) return;
+
           \tuint32 lo = 0, hi = s_tliCount;
+
           \twhile (lo + 1U < hi) {
+
           \t\tuint32 mid = lo + ((hi - lo) >> 1);
+
           \t\tif (s_tli[mid].oldOff <= off) lo = mid; else hi = mid;
+
           \t}
+
           \tuint32 delta = off - s_tli[lo].oldOff;
+
           \tif (delta == 0U) { off = s_tli[lo].newOff; if (plen) *plen = s_tli[lo].newLen; }
+
           \telse if (delta < s_tli[lo].newLen) { off = s_tli[lo].newOff + delta; if (plen) *plen = s_tli[lo].newLen - delta; }
+
           }
+
           """
+
           assert "namespace Scumm {" in snd_he_t, "Missing namespace Scumm in sound_he.cpp"
+
           snd_he_t = tli_inc + snd_he_t.replace("namespace Scumm {", tli_ns, 1)
+
           snd_he_t, n_pv = re.subn(r"(void\s+SoundHE::playVoice\s*\(\s*uint32\s+(\w+)\s*,\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, &\3);", snd_he_t, count=1)
+
           snd_he_t, n_st = re.subn(r"(void\s+SoundHE::startHETalkSound\s*\(\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, nullptr);", snd_he_t, count=1)
+
           assert (n_pv + n_st) >= 1, f"Failed to patch sound_he.cpp: {n_pv},{n_st}"
+
           open(snd_he_p, "w").write(snd_he_t)
 
+
+
           # 5c. HE .dat backslash fallback + V47 Smacker/LVD1 pacer + post-decode audio pump
+
           anim_p = "engines/scumm/he/animation_he.cpp"
+
           anim_hdr = (
+
               '#include "common/scummsys.h"\n#include "common/config-manager.h"\n#include "common/archive.h"\n'
+
               'extern "C" {\n'
+
               'void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms);\n'
+
               'void leapster_pace_he_video(void);\n'
+
               'void leapster_pump_audio(void);\n'
+
               '}\n'
+
               'template <typename V> static inline auto leap_decode_vid_frame(V &v) -> decltype(v->decodeNextFrame()) {\n'
+
               '\tleapster_pace_he_video();\n'
+
               '\tauto s = v->decodeNextFrame();\n'
+
               '\tleapster_pump_audio();\n'
+
               '\treturn s;\n'
+
               '}\n'
+
           )
+
           anim_t, n_ah = re.subn(r'(\bnamespace\s+Scumm\s*\{)', lambda m: anim_hdr + m.group(1), open(anim_p, "r").read(), count=1)
+
           assert n_ah == 1, "Failed to inject anim_hdr into animation_he.cpp"
+
           anim_fix = """
+
               leapster_pump_audio();
+
               static bool s_dirIndexed = false;
+
               if (!s_dirIndexed && ConfMan.hasKey("path")) { SearchMan.addDirectory(ConfMan.getPath("path"), 0, 5, true); s_dirIndexed = true; }
+
               Common::String rawStr = filename.toString();
+
               for (uint idx = 0; idx < rawStr.size(); ++idx) { if ((byte)rawStr[idx] == 92) rawStr.setChar('/', idx); }
+
               Common::Path normPath(rawStr, '/');
+
               size_t sl = rawStr.findLastOf('/');
+
               Common::Path baseOnly((sl == Common::String::npos) ? rawStr : rawStr.substr(sl + 1), '/');
+
               bool loaded = _video->loadFile(filename) || _video->loadFile(normPath) || _video->loadFile(baseOnly);
+
               leapster_pump_audio();
+
               if (!loaded) { leapster_telem_video(rawStr.c_str(), 0, 0, 0, flags, 0, 0); warning("Failed to load video file %s", rawStr.c_str()); return -1; }
+
               leapster_telem_video(rawStr.c_str(), 1, _video->getWidth(), _video->getHeight(), flags, (unsigned int)_video->getFrameCount(), (unsigned int)_video->getDuration().msecs());
+
           """
+
           anim_t, n_al = re.subn(r'if\s*\(\s*!_video->loadFile\(filename\)\s*\)\s*\{\s*warning\([^;]+;\s*return\s+-1;\s*\}', lambda _: anim_fix, anim_t, count=1)
+
           anim_t, n_dn = re.subn(r'_video->decodeNextFrame\(\s*\)', 'leap_decode_vid_frame(_video)', anim_t)
+
           assert n_al == 1 and n_dn >= 1, f"Failed to patch animation_he.cpp: {n_al},{n_dn}"
+
           open(anim_p, "w").write(anim_t)
 
+
+
           # 5d. MediaStation AudioSequence 260ms speaker-drain guard (keeps The Lion King intact)
+
           ms_aud_p = "engines/mediastation/audio.cpp"
+
           ms_aud_t = open(ms_aud_p, "r").read()
+
           ms_helper = """extern "C" unsigned int leapster_hw_get_millis(void);
+
           namespace MediaStation {
+
           static struct { const void *seq; unsigned int t0; } s_leapDrain[8];
+
           static void leapDrainClear(const void *s) {
+
           \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == s) { s_leapDrain[i].seq = nullptr; s_leapDrain[i].t0 = 0; }
+
           }
+
           static bool leapDrainReady(const void *s, unsigned int waitMs) {
+
           \tunsigned int now = leapster_hw_get_millis();
+
           \tif (!now) now = 1;
+
           \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == s) return (now - s_leapDrain[i].t0) >= waitMs;
+
           \tfor (int i = 0; i < 8; ++i) if (s_leapDrain[i].seq == nullptr) { s_leapDrain[i].seq = s; s_leapDrain[i].t0 = now; return false; }
+
           \treturn true;
+
           }
+
           """
+
           ms_aud_t = ms_aud_t.replace("namespace MediaStation {", ms_helper, 1)
+
           ms_aud_t, n_ms1 = re.subn(r"(void\s+AudioSequence::start\s*\(\s*\)\s*\{)", r"\1\n\tleapDrainClear(this);", ms_aud_t, count=1)
+
           ms_aud_t, n_ms2 = re.subn(r"(void\s+AudioSequence::stop\s*\(\s*\)\s*\{)", r"\1\n\tleapDrainClear(this);", ms_aud_t, count=1)
+
           ms_srv_rep = """void AudioSequence::service() {
+
           \tbool soundActuallyPlaying = g_engine->_mixer->isSoundHandleActive(_handle);
+
           \tif (soundActuallyPlaying) {
+
           \t\tleapDrainClear(this);
+
           \t} else if (_state == kSoundPlayStatePlaying && leapDrainReady(this, 260)) {
+
           \t\tleapDrainClear(this);
+
           \t\tmakeSoundIdle(kSoundStopForEnd);
+
           \t}
+
           }"""
+
           ms_aud_t, n_ms3 = re.subn(
+
               r"void\s+AudioSequence::service\s*\(\s*\)\s*\{\s*bool\s+soundActuallyPlaying\s*=\s*g_engine->_mixer->isSoundHandleActive\(_handle\);\s*if\s*\(_state\s*==\s*kSoundPlayStatePlaying\s*&&\s*!soundActuallyPlaying\)\s*\{\s*makeSoundIdle\(kSoundStopForEnd\);\s*\}\s*\}",
+
               lambda _: ms_srv_rep, ms_aud_t, count=1
+
           )
+
           assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1
+
           open(ms_aud_p, "w").write(ms_aud_t)
 
+
+
           # 6. V47 1:1 stylus input + monotonic getMillis + 20ms coroutine yield + 25 FPS room cap
+
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
+
           inp_t = open(inp_p, "r").read().replace(
+
               "void OSystem_libretro::processInputs(void) {",
+
               'extern "C" void leapster_telem_click(void);\nvoid OSystem_libretro::processInputs(void) {', 1
+
           )
+
           s_anc = "if (retro_setting_get_pointer_device() == RETRO_DEVICE_POINTER) {"
+
           e_anc = "} else if (retro_setting_get_pointer_device() == RETRO_DEVICE_MOUSE) {"
+
           si_in, ei_in = inp_t.index(s_anc), inp_t.index(e_anc)
+
           clean_ptr = """if (retro_setting_get_pointer_device() == RETRO_DEVICE_POINTER) {
+
           \t\tint p_x     = retro_input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+
           \t\tint p_y     = retro_input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+
           \t\tint p_press = retro_input_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED);
+
           \t\tint sw = getScreenWidth(), sh = getScreenHeight();
+
           \t\tint px = sw > 0 ? (int)(((long)(p_x + 0x7fff) * sw) / 0xffffL) : 0;
+
           \t\tint py = sh > 0 ? (int)(((long)(p_y + 0x7fff) * sh) / 0xffffL) : 0;
+
           \t\tif (px < 0) px = 0; else if (sw > 0 && px >= sw) px = sw - 1;
+
           \t\tif (py < 0) py = 0; else if (sh > 0 && py >= sh) py = sh - 1;
+
           \t\tstatic bool wasPressed = false, pendingDown = false, leftDown = false;
+
           \t\tstatic int lastX = -1, lastY = -1;
+
           \t\tif (p_press && !wasPressed) {
+
           \t\t\twasPressed = true; _mouseX = lastX = px; _mouseY = lastY = py;
+
           \t\t\tCommon::Event ev; ev.type = Common::EVENT_MOUSEMOVE;
+
           \t\t\tev.mouse.x = _mouseX; ev.mouse.y = _mouseY; ev.relMouse.x = 0; ev.relMouse.y = 0;
+
           \t\t\t_events.push_back(ev); setMousePosition(_mouseX, _mouseY); pendingDown = true;
+
           \t\t} else if (pendingDown) {
+
           \t\t\tpendingDown = false;
+
           \t\t\tif (p_press && (px != lastX || py != lastY)) { _mouseX = lastX = px; _mouseY = lastY = py; setMousePosition(_mouseX, _mouseY); }
+
           \t\t\tCommon::Event ev; ev.type = eventID[0][0]; ev.mouse.x = _mouseX; ev.mouse.y = _mouseY;
+
           \t\t\t_events.push_back(ev); leftDown = true; leapster_telem_click();
+
           \t\t\tif (!p_press) wasPressed = false;
+
           \t\t} else if (p_press && wasPressed) {
+
           \t\t\tif (px != lastX || py != lastY) {
+
           \t\t\t\tCommon::Event ev; ev.type = Common::EVENT_MOUSEMOVE;
+
           \t\t\t\tev.mouse.x = px; ev.mouse.y = py; ev.relMouse.x = px - lastX; ev.relMouse.y = py - lastY;
+
           \t\t\t\t_mouseX = lastX = px; _mouseY = lastY = py; _events.push_back(ev); setMousePosition(_mouseX, _mouseY);
+
           \t\t\t}
+
           \t\t} else if (!p_press) {
+
           \t\t\twasPressed = false;
+
           \t\t\tif (leftDown) { Common::Event ev; ev.type = eventID[0][1]; ev.mouse.x = _mouseX; ev.mouse.y = _mouseY; _events.push_back(ev); leftDown = false; }
+
           \t\t}
+
           \t"""
+
           open(inp_p, "w").write(inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
 
+
+
           ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); int leapster_should_yield_audio(void); }\nextern void retro_switch_to_main_thread(void);\n'
+
           got_gm = got_us = got_dm = False
+
           for root, _, files in os.walk("backends/platform/libretro/src"):
+
               for fn in files:
+
                   if not fn.endswith(".cpp"): continue
+
                   fp = os.path.join(root, fn)
+
                   t, mod = open(fp, errors="ignore").read(), False
+
                   if "OSystem_libretro::getMillis" in t:
+
                       t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1)
+
                       mod = mod or (n > 0); got_gm = got_gm or (n > 0)
+
                   if "::updateScreen" in t:
+
                       t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw);", t, count=1)
+
                       mod = mod or (n > 0); got_us = got_us or (n > 0)
+
                   md = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", t)
+
                   if md:
+
                       p, si, bi, dp, ei = md.group(1), md.start(), md.end() - 1, 0, -1
+
                       for i in range(bi, len(t)):
+
                           dp += (t[i] == "{") - (t[i] == "}")
+
                           if dp == 0: ei = i + 1; break
+
                       mc = re.search(r"\(\(LibretroTimerManager\s*\*\)\s*_timerManager\)->checkThread\([^)]*\)", t[bi:ei])
+
                       chk = mc.group(0) if mc else "((LibretroTimerManager *)_timerManager)->checkThread(THREAD_SWITCH_DELAY)"
+
                       nfn = (
+
                           f'extern "C" void leapster_os_delay(unsigned int ms) {{ if (g_system) g_system->delayMillis(ms); }}\n'
+
                           f"void OSystem_libretro::delayMillis(uint {p}) {{\n"
+
                           f"\tuint32 st = getMillis(), el = 0;\n"
+
                           f"\tif ({p} == 0) {{ if (leapster_should_yield_audio()) retro_switch_to_main_thread(); else {chk}; return; }}\n"
+
                           f"\twhile (el < {p}) {{\n"
+
                           f"\t\tif (leapster_should_yield_audio()) retro_switch_to_main_thread();\n"
+
                           f"\t\telse if (!{chk}) leapster_sleep_us(500);\n"
+
                           f"\t\tel = getMillis() - st;\n"
+
                           f"\t}}\n"
+
                           f"\tleapster_telem_delay({p}, el);\n"
+
                           f"}}"
+
                       )
+
                       t, mod, got_dm = t[:si] + nfn + t[ei:], True, True
+
                   if mod: open(fp, "w").write(ext + t)
+
           assert got_gm and got_us and got_dm
 
+
+
           # 7. V47 Locked Audio Engine (partial-slice zero-pad + 70280U resampler + 3-frame video credit)
+
           cp = "backends/platform/libretro/src/libretro-core.cpp"
+
           ct = open(cp, "r").read()
+
           ct, _ = re.subn(r"static\s+uint16\s+sample_rate\s*=\s*\d+\s*;", "static uint16 sample_rate = 44100;", ct, count=1)
+
           ct, _ = re.subn(r"sample_rate\s*=\s*atoi\(sample_rate_var\);", "sample_rate = 44100;", ct, count=1)
+
           ct, _ = re.subn(r"sample_rate\s*=\s*DEFAULT_SAMPLE_RATE;", "sample_rate = 44100;", ct, count=1)
 
+
+
           m_init = re.search(r"static\s+void\s+audio_buffer_init\s*\([^)]*\)\s*\{", ct)
+
           bi_s, dp, bi_e = m_init.start(), 0, -1
+
           for i in range(m_init.end() - 1, len(ct)):
+
               dp += (ct[i] == "{") - (ct[i] == "}")
+
               if dp == 0: bi_e = i + 1; break
+
           new_init = """static void audio_buffer_init(uint16 sample_rate, uint16 frame_rate) {
+
           \taudio_samples_accumulator = 0.0f; audio_last_time_usec = 0;
+
           \taudio_samples_per_frame = frame_rate ? ((float)sample_rate / (float)frame_rate) : 882.0f;
+
           \tuint32 audio_sample_buffer_size = 12288U * 2U * sizeof(int16);
+
           \taudio_sample_buffer = audio_sample_buffer ? (int16 *)realloc(audio_sample_buffer, audio_sample_buffer_size) : (int16 *)malloc(audio_sample_buffer_size);
+
           \tif (audio_sample_buffer) memset(audio_sample_buffer, 0, audio_sample_buffer_size);
+
           }"""
+
           ct = ct[:bi_s] + new_init + ct[bi_e:]
 
+
+
           m_arun = re.search(r"static\s+void\s+audio_run\s*\(\s*void\s*\)\s*\{", ct)
+
           ar_s, dp, ar_e = m_arun.start(), 0, -1
+
           for i in range(m_arun.end() - 1, len(ct)):
+
               dp += (ct[i] == "{") - (ct[i] == "}")
+
               if dp == 0: ar_e = i + 1; break
+
           new_arun = """static void audio_run(void) {
+
           \tif (!audio_sample_buffer || !g_system) return;
+
           \tuint64_t mono_u = leap_us();
+
           \tretro_time_t now_usec = (retro_time_t)mono_u;
+
           \tg_last_aud_u = mono_u;
+
           \tif (audio_last_time_usec <= 0 || now_usec < audio_last_time_usec) {
+
           \t\taudio_last_time_usec = now_usec - 20000;
+
           \t\taudio_samples_accumulator = 0.0f;
+
           \t}
+
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
+
           \taudio_last_time_usec = now_usec;
+
           \tif (delta_usec > 120000) delta_usec = 120000;
+
           \tfloat samples_target = audio_samples_accumulator + (44100.0f * (float)delta_usec) / 1000000.0f;
+
           \tuint32 full_target = (uint32)samples_target;
+
           \taudio_samples_accumulator = samples_target - (float)full_target;
+
           \tif (full_target > 11000U) full_target = 11000U;
+
           \tif (full_target == 0) return;
 
+
+
           \tuint32 samples_produced = ((Audio::MixerImpl *)g_system->getMixer())->mixCallback((byte *)audio_sample_buffer, full_target * 2U * sizeof(int16));
+
           \tuint32 in_frames = full_target;
+
           \tif (samples_produced > 0) {
+
           \t\tleap_telem_mix(samples_produced);
+
           \t\tif (samples_produced < full_target)
+
           \t\t\tmemset(audio_sample_buffer + (samples_produced * 2U), 0, (full_target - samples_produced) * 2U * sizeof(int16));
+
           \t} else {
+
           \t\tuint32 sil_cap = (g_aud_backoff > 0U) ? 1102U : 2646U;
+
           \t\tif (in_frames > sil_cap) in_frames = sil_cap;
+
           \t\tmemset(audio_sample_buffer, 0, in_frames * 2U * sizeof(int16));
+
           \t}
+
+
 
           \tuint32 step_fp = 70280U;
+
           \tif (g_aud_backoff > 0U) { g_aud_backoff--; step_fp = 71400U; }
+
           \tstatic uint32 s_rs_pos = 0;
+
           \tstatic int s_prev_l = 0, s_prev_r = 0;
+
           \tuint32 out_frames = 0, idx = s_rs_pos >> 16;
+
           \twhile (idx < in_frames && out_frames < 11000U) {
+
           \t\tuint32 frac = s_rs_pos & 0xFFFFU;
+
           \t\tint l0 = (idx == 0U) ? s_prev_l : (int)audio_sample_buffer[(idx - 1U) * 2U];
+
           \t\tint r0 = (idx == 0U) ? s_prev_r : (int)audio_sample_buffer[(idx - 1U) * 2U + 1U];
+
           \t\tint l1 = (int)audio_sample_buffer[idx * 2U], r1 = (int)audio_sample_buffer[idx * 2U + 1U];
+
           \t\tg_dac_buf[out_frames * 2U]     = (int16)(l0 + (((l1 - l0) * (int)frac) >> 16));
+
           \t\tg_dac_buf[out_frames * 2U + 1U] = (int16)(r0 + (((r1 - r0) * (int)frac) >> 16));
+
           \t\tout_frames++; s_rs_pos += step_fp; idx = s_rs_pos >> 16;
+
           \t}
+
           \ts_prev_l = (int)audio_sample_buffer[(in_frames - 1U) * 2U];
+
           \ts_prev_r = (int)audio_sample_buffer[(in_frames - 1U) * 2U + 1U];
+
           \ts_rs_pos -= (in_frames << 16);
+
           \tif (out_frames == 0) return;
 
+
+
           \tav_status &= ~AUDIO_STATUS_MUTE;
+
           \tif (audio_batch_cb) {
+
           \t\tint16 *send_ptr = g_dac_buf; uint32 send_frames = out_frames;
+
           \t\twhile (send_frames > 0) {
+
           \t\t\tuint32 ch = (send_frames > AUDIO_BATCH_FRAMES_MAX) ? AUDIO_BATCH_FRAMES_MAX : send_frames;
+
           \t\t\taudio_batch_cb(send_ptr, ch); send_frames -= ch; send_ptr += ch << 1;
+
           \t\t}
+
           \t}
+
           }"""
+
           ct = ct[:ar_s] + new_arun + ct[ar_e:]
 
+
+
           hook = r"""
+
           #include <fcntl.h>
+
           #include <unistd.h>
+
           #include <stdlib.h>
+
           #include <stdio.h>
+
           #include <string.h>
+
           #include <stdint.h>
+
           #include <time.h>
+
           #include <math.h>
+
           #include <linux/input.h>
+
           #include <sys/ioctl.h>
+
           extern "C" {
+
           float __wrap_expf(float x) { return (float)exp((double)x); }
+
           float __wrap_exp2f(float x) { return (float)pow(2.0, (double)x); }
+
           float __wrap_logf(float x) { return (float)log((double)x); }
+
           float __wrap_log2f(float x) { return (float)(log((double)x) * 1.4426950408889634); }
+
           float __wrap_powf(float x, float y) { return (float)pow((double)x, (double)y); }
+
           void leapster_os_delay(unsigned int ms);
+
           }
+
           extern void retro_switch_to_main_thread(void);
+
           static retro_environment_t g_orig_env = NULL;
+
           static retro_input_state_t g_orig_in = NULL;
+
           static retro_audio_sample_batch_t g_orig_aud = NULL;
+
           static retro_video_refresh_t g_orig_vid = NULL;
+
           static int g_ts_fd = -2, g_pcal_on = 0, g_has_btn = 0, g_dbpp = 0;
+
           static int g_cx = 160, g_cy = 120, g_rx = 160, g_ry = 120, g_tch = 0, g_lsx = -100, g_lsy = -100, g_mnx = 0, g_mxx = 319, g_mny = 0, g_mxy = 239;
+
           static int g_vid_lx = -999, g_vid_ly = -999;
+
           static long g_pcal[7] = {1, 0, 0, 0, 1, 0, 1};
+
           static bool g_ever = false, g_deb_pressed = false, g_in_pump = false;
+
           static uint64_t g_last_down_u = 0, g_last_rel_u = 0, g_bucket_u = 0, g_vid_bucket_u = 0, g_vid_frame_u = 65500ULL, g_last_vid_decode_u = 0, g_last_aud_u = 0, g_blk_u = 0;
+
           static unsigned int g_last_ms = 0, g_vid_rem = 0, g_aud_backoff = 0;
+
           static uint32_t g_scr_gen = 1, g_vid_gen = 0;
+
           static int16_t g_rx_out = 0, g_ry_out = 0, g_rp_out = 0;
+
           static int16_t g_dac_buf[12288 * 2];
+
           static FILE *g_tfp = NULL;
+
           static uint64_t g_t0 = 0, g_win = 0, g_pre_u = 0, g_emu_u = 0;
+
           static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
+
           static uint32_t g_d32[320 * 240];
+
           static uint16_t g_d16[320 * 240];
+
           static void leap_open_log(void) {
+
               if (!g_tfp) {
+
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
+
                   if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V48 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+
               }
+
           }
+
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
+
           static bool leap_env_cb(unsigned cmd, void *data) {
+
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK || cmd == 6U || cmd == 60U) return true;
+
               return g_orig_env ? g_orig_env(cmd, data) : false;
+
           }
+
           extern "C" unsigned int leapster_hw_get_millis(void) {
+
               uint64_t u = leap_us(); if (!g_t0) g_t0 = u;
+
               unsigned int ms = (unsigned int)((u - g_t0) / 1000ULL);
+
               if (ms < g_last_ms) ms = g_last_ms; else g_last_ms = ms;
+
               return ms;
+
           }
+
           extern "C" void leapster_sleep_us(unsigned int us) { usleep((useconds_t)us); }
+
           extern "C" void leapster_telem_delay(unsigned int r, unsigned int a) { (void)r; g_dc++; g_dw += a; }
+
           extern "C" void leapster_telem_click(void) { g_clicks++; g_scr_gen++; }
+
           extern "C" int leapster_should_yield_audio(void) {
+
               if (g_in_pump || g_total_runs < 5) return 0;
+
               uint64_t u = leap_us();
+
               return (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 20000ULL) ? 1 : 0;
+
           }
+
           extern "C" void leapster_pump_audio(void) {
+
               if (g_in_pump || g_total_runs < 5) return;
+
               uint64_t u = leap_us();
+
               if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
+
                   g_in_pump = true; retro_switch_to_main_thread(); g_in_pump = false;
+
               }
+
           }
+
           extern "C" unsigned int leapster_pace_update_screen(void) {
+
               g_uscr++; g_scr_gen++;
+
               if (g_total_runs < 5) return 0;
+
               uint64_t u = leap_us();
+
               if (g_last_vid_decode_u && u >= g_last_vid_decode_u && (u - g_last_vid_decode_u) < 150000ULL) { g_bucket_u = u; return 0; }
+
               if (!g_bucket_u) g_bucket_u = u;
+
               if (u > g_bucket_u + 40000ULL) g_bucket_u = u - 40000ULL;
+
               g_bucket_u += 40000ULL;
+
               if (g_bucket_u > u) { unsigned int w = (unsigned int)((g_bucket_u - u + 500ULL) / 1000ULL); return w > 40 ? 40 : w; }
+
               return 0;
+
           }
+
           extern "C" void leapster_telem_video(const char *fn, int ok, int w, int h, int flags, unsigned int fcnt, unsigned int dur_ms) {
+
               leap_open_log();
+
               uint64_t fu = 65500ULL;
+
               if (ok && fcnt > 2U && dur_ms > 0U) {
+
                   uint64_t hdr = ((uint64_t)dur_ms * 1000ULL) / (uint64_t)fcnt;
+
                   if (hdr < 65500ULL) fu = (hdr < 50000ULL) ? 50000ULL : hdr;
+
               }
+
               g_vid_frame_u = fu; g_vid_rem = (ok && fcnt > 2U) ? 1U : 0U; g_vid_bucket_u = 0ULL;
+
               if (g_tfp) { fprintf(g_tfp, "[VIDEO] file='%s' ok=%d size=%dx%d flags=0x%x frames=%u dur_ms=%u step_us=%llu\n", fn ? fn : "", ok, w, h, flags, fcnt, dur_ms, (unsigned long long)fu); fflush(g_tfp); }
+
           }
+
           extern "C" void leapster_pace_he_video(void) {
+
               if (g_vid_rem == 0U) return;
+
               uint64_t u = leap_us(); g_last_vid_decode_u = u;
+
               if (!g_vid_bucket_u) { g_vid_bucket_u = u; return; }
+
               if (u > g_vid_bucket_u + g_vid_frame_u * 3ULL) g_vid_bucket_u = u - g_vid_frame_u * 3ULL;
+
               g_vid_bucket_u += g_vid_frame_u;
+
               if (g_vid_bucket_u > u + 4000ULL) {
+
                   unsigned int w = (unsigned int)((g_vid_bucket_u - u - 3500ULL) / 1000ULL);
+
                   if (w > 0U && w <= 80U) leapster_os_delay(w);
+
               }
+
           }
+
           static void leap_telem_mix(uint32 f) { g_mf += f; if (f > g_mb) g_mb = f; }
+
           static size_t leap_aud_cb(const int16_t *d, size_t f) {
+
               if (!g_orig_aud || !d || f == 0) return f;
+
               uint64_t t0 = leap_us(); size_t sent = g_orig_aud(d, f); uint64_t blk = leap_us() - t0;
+
               g_blk_u += blk; if (blk >= 1500ULL && g_total_runs >= 5U) g_aud_backoff = 12U;
+
               g_af += (uint32_t)sent; return sent;
+
           }
+
           #define LDK16(c)  (((c) & 0xE71Cu) == 0)
+
           #define LAVG16(a, b) ((uint16_t)(((a) & (b)) + ((((a) ^ (b)) & 0xF7DEu) >> 1)))
+
           #define LDK32(c)  (((c) & 0x00E0E0E0u) == 0)
+
           #define LAVG32(a, b) ((((a) & (b)) + ((((a) ^ (b)) & 0x00FEFEFEu) >> 1)))
+
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
+
               if (!g_orig_vid) return;
+
               if (w == 640 && h == 480) {
+
                   if ((!d || (g_vid_gen == g_scr_gen && g_vid_lx == g_lsx && g_vid_ly == g_lsy)) && g_dbpp != 0) { g_orig_vid(NULL, 320, 240, g_dbpp == 4 ? 1280 : 640); return; }
+
                   g_vid_gen = g_scr_gen; g_vid_lx = g_lsx; g_vid_ly = g_lsy;
+
                   if (d) {
+
                       if (p >= 2560) {
+
                           size_t row = p >> 2; const uint32_t *base = (const uint32_t *)d; uint32_t *o = g_d32;
+
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
+
                               const uint32_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
+
                               for (unsigned x = 0; x < 320; ++x) {
+
                                   unsigned x2 = x << 1; uint32_t p00 = s0[x2], p01 = s0[x2 + 1], p10 = s1[x2], p11 = s1[x2 + 1];
+
                                   if (p00 == p10 && p00 == p01 && p00 == p11) { o[x] = p00; continue; }
+
                                   uint32_t a0 = (p00 == p01) ? p00 : LAVG32(p00, p01), a1 = (p10 == p11) ? p10 : LAVG32(p10, p11);
+
                                   if (a0 == a1) { o[x] = a0; continue; }
+
                                   bool dk0 = LDK32(p00) && LDK32(p01), dk1 = LDK32(p10) && LDK32(p11);
+
                                   o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG32(a0, a1));
+
                               }
+
                           }
+
                           g_dbpp = 4;
+
                       } else if (p >= 1280) {
+
                           size_t row = p >> 1; const uint16_t *base = (const uint16_t *)d; uint16_t *o = g_d16;
+
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
+
                               const uint16_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
+
                               for (unsigned x = 0; x < 320; ++x) {
+
                                   unsigned x2 = x << 1; uint16_t p00 = s0[x2], p01 = s0[x2 + 1], p10 = s1[x2], p11 = s1[x2 + 1];
+
                                   if (p00 == p10 && p00 == p01 && p00 == p11) { o[x] = p00; continue; }
+
                                   uint16_t a0 = (p00 == p01) ? p00 : LAVG16(p00, p01), a1 = (p10 == p11) ? p10 : LAVG16(p10, p11);
+
                                   if (a0 == a1) { o[x] = a0; continue; }
+
                                   bool dk0 = LDK16(p00) && LDK16(p01), dk1 = LDK16(p10) && LDK16(p11);
+
                                   o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG16(a0, a1));
+
                               }
+
                           }
+
                           g_dbpp = 2;
+
                       }
+
                   }
+
                   if (g_dbpp == 4) { g_orig_vid(g_d32, 320, 240, 1280); return; }
                   if (g_dbpp == 2) { g_orig_vid(g_d16, 320, 240, 640); return; }
               }
