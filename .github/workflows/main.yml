@@ -276,245 +276,245 @@ jobs:
           raw_p = "audio/decoders/raw.cpp"
           raw_orig = open(raw_p, "r").read()
           raw_hdr = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
-#include <stdlib.h>
-#include <string.h>
-#include "common/endian.h"
-#include "common/memstream.h"
-#include "audio/decoders/vorbis.h"
+          #include <stdlib.h>
+          #include <string.h>
+          #include "common/endian.h"
+          #include "common/memstream.h"
+          #include "audio/decoders/vorbis.h"
 
-namespace Audio {
-static SeekableAudioStream *leapTryDecodeOggBytes(const byte *buf, uint32 sz, int fallbackRate, byte fallbackFlags) {
-\tif (!buf || sz < 28 || READ_BE_UINT32(buf) != MKTAG('O', 'g', 'g', 'S'))
-\t\treturn nullptr;
-\tbyte *copy = (byte *)malloc(sz);
-\tif (copy) {
-\t\tmemcpy(copy, buf, sz);
-\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(copy, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-\t\tif (vs)
-\t\t\treturn vs;
-\t}
-\tbyte *sil = (byte *)malloc(64);
-\tif (!sil)
-\t\treturn nullptr;
-\tmemset(sil, (fallbackFlags & FLAG_UNSIGNED) ? 0x80 : 0x00, 64);
-\treturn makeRawStream(new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES), fallbackRate > 0 ? fallbackRate : 11025, fallbackFlags, DisposeAfterUse::YES);
-}
+          namespace Audio {
+          static SeekableAudioStream *leapTryDecodeOggBytes(const byte *buf, uint32 sz, int fallbackRate, byte fallbackFlags) {
+          \tif (!buf || sz < 28 || READ_BE_UINT32(buf) != MKTAG('O', 'g', 'g', 'S'))
+          \t\treturn nullptr;
+          \tbyte *copy = (byte *)malloc(sz);
+          \tif (copy) {
+          \t\tmemcpy(copy, buf, sz);
+          \t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(copy, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \t\tif (vs)
+          \t\t\treturn vs;
+          \t}
+          \tbyte *sil = (byte *)malloc(64);
+          \tif (!sil)
+          \t\treturn nullptr;
+          \tmemset(sil, (fallbackFlags & FLAG_UNSIGNED) ? 0x80 : 0x00, 64);
+          \treturn makeRawStream(new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES), fallbackRate > 0 ? fallbackRate : 11025, fallbackFlags, DisposeAfterUse::YES);
+          }
 
-static Common::SeekableReadStream *leapConvertVorbisToRawMem(SeekableAudioStream *vs, int targetRate, byte targetFlags) {
-\tconst bool outUnsigned = (targetFlags & FLAG_UNSIGNED) != 0;
-\tif (!vs) {
-\t\tbyte *sil = (byte *)malloc(64);
-\t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
-\t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
-\t}
-\tconst int vRate = vs->getRate() > 0 ? vs->getRate() : (targetRate > 0 ? targetRate : 11025);
-\tconst bool vStereo = vs->isStereo();
-\tconst bool outStereo = (targetFlags & FLAG_STEREO) != 0;
-\tconst bool out16 = (targetFlags & FLAG_16BITS) != 0;
-\tconst bool outLE = (targetFlags & FLAG_LITTLE_ENDIAN) != 0;
-\tCommon::Array<int16> pcm16;
-\tint16 tmp[2048];
-\twhile (!vs->endOfData()) {
-\t\tint got = vs->readBuffer(tmp, 2048);
-\t\tif (got <= 0)
-\t\t\tbreak;
-\t\tuint32 oldSz = pcm16.size();
-\t\tpcm16.resize(oldSz + (uint32)got);
-\t\tmemcpy(pcm16.data() + oldSz, tmp, (uint32)got * sizeof(int16));
-\t}
-\tdelete vs;
-\tuint32 inFrames = vStereo ? (pcm16.size() / 2U) : pcm16.size();
-\tif (inFrames == 0) {
-\t\tbyte *sil = (byte *)malloc(64);
-\t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
-\t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
-\t}
-\tuint32 outRate = (targetRate > 0) ? (uint32)targetRate : (uint32)vRate;
-\tuint32 outFrames = (outRate == (uint32)vRate) ? inFrames : (uint32)(((uint64)inFrames * outRate) / (uint32)vRate);
-\tif (outFrames == 0)
-\t\toutFrames = 1;
-\tuint32 bytesPerSample = out16 ? 2U : 1U;
-\tuint32 outCh = outStereo ? 2U : 1U;
-\tuint32 outBytes = outFrames * outCh * bytesPerSample;
-\tbyte *outBuf = (byte *)malloc(outBytes);
-\tif (!outBuf) {
-\t\tbyte *sil = (byte *)malloc(64);
-\t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
-\t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
-\t}
-\tbyte *dst = outBuf;
-\tfor (uint32 f = 0; f < outFrames; ++f) {
-\t\tuint32 sf = (outRate == (uint32)vRate) ? f : (uint32)(((uint64)f * (uint32)vRate) / outRate);
-\t\tif (sf >= inFrames)
-\t\t\tsf = inFrames - 1U;
-\t\tint16 sl = vStereo ? pcm16[sf * 2U] : pcm16[sf];
-\t\tint16 sr = vStereo ? pcm16[sf * 2U + 1U] : sl;
-\t\tint16 chans[2] = { sl, sr };
-\t\tfor (uint32 c = 0; c < outCh; ++c) {
-\t\t\tint16 s = chans[c];
-\t\t\tif (out16) {
-\t\t\t\tuint16 u = outUnsigned ? (uint16)((int)s + 32768) : (uint16)s;
-\t\t\t\tif (outLE) WRITE_LE_UINT16(dst, u); else WRITE_BE_UINT16(dst, u);
-\t\t\t\tdst += 2;
-\t\t\t} else {
-\t\t\t\tint8 s8 = (int8)(s >> 8);
-\t\t\t\t*dst++ = outUnsigned ? (byte)((int)s8 + 128) : (byte)s8;
-\t\t\t}
-\t\t}
-\t}
-\treturn new Common::MemoryReadStream(outBuf, outBytes, DisposeAfterUse::YES);
-}
+          static Common::SeekableReadStream *leapConvertVorbisToRawMem(SeekableAudioStream *vs, int targetRate, byte targetFlags) {
+          \tconst bool outUnsigned = (targetFlags & FLAG_UNSIGNED) != 0;
+          \tif (!vs) {
+          \t\tbyte *sil = (byte *)malloc(64);
+          \t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
+          \t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
+          \t}
+          \tconst int vRate = vs->getRate() > 0 ? vs->getRate() : (targetRate > 0 ? targetRate : 11025);
+          \tconst bool vStereo = vs->isStereo();
+          \tconst bool outStereo = (targetFlags & FLAG_STEREO) != 0;
+          \tconst bool out16 = (targetFlags & FLAG_16BITS) != 0;
+          \tconst bool outLE = (targetFlags & FLAG_LITTLE_ENDIAN) != 0;
+          \tCommon::Array<int16> pcm16;
+          \tint16 tmp[2048];
+          \twhile (!vs->endOfData()) {
+          \t\tint got = vs->readBuffer(tmp, 2048);
+          \t\tif (got <= 0)
+          \t\t\tbreak;
+          \t\tuint32 oldSz = pcm16.size();
+          \t\tpcm16.resize(oldSz + (uint32)got);
+          \t\tmemcpy(pcm16.data() + oldSz, tmp, (uint32)got * sizeof(int16));
+          \t}
+          \tdelete vs;
+          \tuint32 inFrames = vStereo ? (pcm16.size() / 2U) : pcm16.size();
+          \tif (inFrames == 0) {
+          \t\tbyte *sil = (byte *)malloc(64);
+          \t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
+          \t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
+          \t}
+          \tuint32 outRate = (targetRate > 0) ? (uint32)targetRate : (uint32)vRate;
+          \tuint32 outFrames = (outRate == (uint32)vRate) ? inFrames : (uint32)(((uint64)inFrames * outRate) / (uint32)vRate);
+          \tif (outFrames == 0)
+          \t\toutFrames = 1;
+          \tuint32 bytesPerSample = out16 ? 2U : 1U;
+          \tuint32 outCh = outStereo ? 2U : 1U;
+          \tuint32 outBytes = outFrames * outCh * bytesPerSample;
+          \tbyte *outBuf = (byte *)malloc(outBytes);
+          \tif (!outBuf) {
+          \t\tbyte *sil = (byte *)malloc(64);
+          \t\tmemset(sil, outUnsigned ? 0x80 : 0x00, 64);
+          \t\treturn new Common::MemoryReadStream(sil, 64, DisposeAfterUse::YES);
+          \t}
+          \tbyte *dst = outBuf;
+          \tfor (uint32 f = 0; f < outFrames; ++f) {
+          \t\tuint32 sf = (outRate == (uint32)vRate) ? f : (uint32)(((uint64)f * (uint32)vRate) / outRate);
+          \t\tif (sf >= inFrames)
+          \t\t\tsf = inFrames - 1U;
+          \t\tint16 sl = vStereo ? pcm16[sf * 2U] : pcm16[sf];
+          \t\tint16 sr = vStereo ? pcm16[sf * 2U + 1U] : sl;
+          \t\tint16 chans[2] = { sl, sr };
+          \t\tfor (uint32 c = 0; c < outCh; ++c) {
+          \t\t\tint16 s = chans[c];
+          \t\t\tif (out16) {
+          \t\t\t\tuint16 u = outUnsigned ? (uint16)((int)s + 32768) : (uint16)s;
+          \t\t\t\tif (outLE) WRITE_LE_UINT16(dst, u); else WRITE_BE_UINT16(dst, u);
+          \t\t\t\tdst += 2;
+          \t\t\t} else {
+          \t\t\t\tint8 s8 = (int8)(s >> 8);
+          \t\t\t\t*dst++ = outUnsigned ? (byte)((int)s8 + 128) : (byte)s8;
+          \t\t\t}
+          \t\t}
+          \t}
+          \treturn new Common::MemoryReadStream(outBuf, outBytes, DisposeAfterUse::YES);
+          }
 
-struct LeapChunkedOggAcc {
-\tconst void *owner;
-\tCommon::Array<byte> acc;
-\tint rate;
-\tbyte flags;
-\tbool active;
-};
-static LeapChunkedOggAcc s_oggAcc[8];
+          struct LeapChunkedOggAcc {
+          \tconst void *owner;
+          \tCommon::Array<byte> acc;
+          \tint rate;
+          \tbyte flags;
+          \tbool active;
+          };
+          static LeapChunkedOggAcc s_oggAcc[8];
 
-static Common::SeekableReadStream *leapFilterPacketStream(const void *owner, Common::SeekableReadStream *data, int targetRate, byte targetFlags) {
-\tif (!data)
-\t\treturn data;
-\tint64 p0 = data->pos();
-\tint64 rem64 = data->size() - p0;
-\tif (rem64 <= 0 || rem64 > 64 * 1024 * 1024)
-\t\treturn data;
-\tuint32 sz = (uint32)rem64;
-\tuint32 mg = 0;
-\tif (sz >= 4) {
-\t\tmg = data->readUint32BE();
-\t\tdata->seek(p0, SEEK_SET);
-\t}
-\tLeapChunkedOggAcc *slot = nullptr;
-\tfor (int i = 0; i < 8; ++i) {
-\t\tif (s_oggAcc[i].active && s_oggAcc[i].owner == owner) {
-\t\t\tslot = &s_oggAcc[i];
-\t\t\tbreak;
-\t\t}
-\t}
-\tif (mg != MKTAG('O', 'g', 'g', 'S') && !slot)
-\t\treturn data;
+          static Common::SeekableReadStream *leapFilterPacketStream(const void *owner, Common::SeekableReadStream *data, int targetRate, byte targetFlags) {
+          \tif (!data)
+          \t\treturn data;
+          \tint64 p0 = data->pos();
+          \tint64 rem64 = data->size() - p0;
+          \tif (rem64 <= 0 || rem64 > 64 * 1024 * 1024)
+          \t\treturn data;
+          \tuint32 sz = (uint32)rem64;
+          \tuint32 mg = 0;
+          \tif (sz >= 4) {
+          \t\tmg = data->readUint32BE();
+          \t\tdata->seek(p0, SEEK_SET);
+          \t}
+          \tLeapChunkedOggAcc *slot = nullptr;
+          \tfor (int i = 0; i < 8; ++i) {
+          \t\tif (s_oggAcc[i].active && s_oggAcc[i].owner == owner) {
+          \t\t\tslot = &s_oggAcc[i];
+          \t\t\tbreak;
+          \t\t}
+          \t}
+          \tif (mg != MKTAG('O', 'g', 'g', 'S') && !slot)
+          \t\treturn data;
 
-\tbyte *chunk = (byte *)malloc(sz);
-\tif (!chunk)
-\t\treturn data;
-\tif (data->read(chunk, sz) != sz) {
-\t\tfree(chunk);
-\t\tdata->seek(p0, SEEK_SET);
-\t\treturn data;
-\t}
-\tdelete data;
+          \tbyte *chunk = (byte *)malloc(sz);
+          \tif (!chunk)
+          \t\treturn data;
+          \tif (data->read(chunk, sz) != sz) {
+          \t\tfree(chunk);
+          \t\tdata->seek(p0, SEEK_SET);
+          \t\treturn data;
+          \t}
+          \tdelete data;
 
-\t// Check if chunk ends with an Ogg EOS page (header_type_flag bit 0x04 on last OggS page)
-\tauto hasOggEos = [](const byte *b, uint32 n) -> bool {
-\t\tif (n < 28) return false;
-\t\tfor (int64 k = (int64)n - 27; k >= 0; --k) {
-\t\t\tif (b[k] == 'O' && b[k + 1] == 'g' && b[k + 2] == 'g' && b[k + 3] == 'S' && b[k + 4] == 0) {
-\t\t\t\treturn (b[k + 5] & 0x04) != 0;
-\t\t\t}
-\t\t}
-\t\treturn false;
-\t};
+          \t// Check if chunk ends with an Ogg EOS page (header_type_flag bit 0x04 on last OggS page)
+          \tauto hasOggEos = [](const byte *b, uint32 n) -> bool {
+          \t\tif (n < 28) return false;
+          \t\tfor (int64 k = (int64)n - 27; k >= 0; --k) {
+          \t\t\tif (b[k] == 'O' && b[k + 1] == 'g' && b[k + 2] == 'g' && b[k + 3] == 'S' && b[k + 4] == 0) {
+          \t\t\t\treturn (b[k + 5] & 0x04) != 0;
+          \t\t\t}
+          \t\t}
+          \t\treturn false;
+          \t};
 
-\tif (!slot) {
-\t\t// Single complete Ogg file in one packet? Decode right now!
-\t\tif (hasOggEos(chunk, sz)) {
-\t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(chunk, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-\t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
-\t\t}
-\t\t// Multi-chunk streamed Ogg (e.g., SoundHE feeding 4KB..16KB slices of an SDAT/SONG!)
-\t\tfor (int i = 0; i < 8; ++i) {
-\t\t\tif (!s_oggAcc[i].active) {
-\t\t\t\tslot = &s_oggAcc[i];
-\t\t\t\tslot->owner = owner;
-\t\t\t\tslot->acc.clear();
-\t\t\t\tslot->rate = targetRate;
-\t\t\t\tslot->flags = targetFlags;
-\t\t\t\tslot->active = true;
-\t\t\t\tbreak;
-\t\t\t}
-\t\t}
-\t\tif (!slot) {
-\t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(chunk, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-\t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
-\t\t}
-\t} else if (mg == MKTAG('O', 'g', 'g', 'S') && sz >= 6 && (chunk[5] & 0x02) != 0 && slot->acc.size() > 0) {
-\t\t// BOS flag (0x02) of a brand new Ogg stream arrived on same channel: reset accumulator
-\t\tslot->acc.clear();
-\t}
+          \tif (!slot) {
+          \t\t// Single complete Ogg file in one packet? Decode right now!
+          \t\tif (hasOggEos(chunk, sz)) {
+          \t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(chunk, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
+          \t\t}
+          \t\t// Multi-chunk streamed Ogg (e.g., SoundHE feeding 4KB..16KB slices of an SDAT/SONG!)
+          \t\tfor (int i = 0; i < 8; ++i) {
+          \t\t\tif (!s_oggAcc[i].active) {
+          \t\t\t\tslot = &s_oggAcc[i];
+          \t\t\t\tslot->owner = owner;
+          \t\t\t\tslot->acc.clear();
+          \t\t\t\tslot->rate = targetRate;
+          \t\t\t\tslot->flags = targetFlags;
+          \t\t\t\tslot->active = true;
+          \t\t\t\tbreak;
+          \t\t\t}
+          \t\t}
+          \t\tif (!slot) {
+          \t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(chunk, sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
+          \t\t}
+          \t} else if (mg == MKTAG('O', 'g', 'g', 'S') && sz >= 6 && (chunk[5] & 0x02) != 0 && slot->acc.size() > 0) {
+          \t\t// BOS flag (0x02) of a brand new Ogg stream arrived on same channel: reset accumulator
+          \t\tslot->acc.clear();
+          \t}
 
-\tuint32 oldLen = slot->acc.size();
-\tslot->acc.resize(oldLen + sz);
-\tmemcpy(slot->acc.data() + oldLen, chunk, sz);
-\tfree(chunk);
+          \tuint32 oldLen = slot->acc.size();
+          \tslot->acc.resize(oldLen + sz);
+          \tmemcpy(slot->acc.data() + oldLen, chunk, sz);
+          \tfree(chunk);
 
-\tif (hasOggEos(slot->acc.data(), slot->acc.size()) || slot->acc.size() >= 2 * 1024 * 1024) {
-\t\tuint32 tot = slot->acc.size();
-\t\tbyte *full = (byte *)malloc(tot);
-\t\tif (full) {
-\t\t\tmemcpy(full, slot->acc.data(), tot);
-\t\t\tslot->acc.clear();
-\t\t\tslot->active = false;
-\t\t\tslot->owner = nullptr;
-\t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(full, tot, DisposeAfterUse::YES), DisposeAfterUse::YES);
-\t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
-\t\t}
-\t\tslot->acc.clear();
-\t\tslot->active = false;
-\t\tslot->owner = nullptr;
-\t}
+          \tif (hasOggEos(slot->acc.data(), slot->acc.size()) || slot->acc.size() >= 2 * 1024 * 1024) {
+          \t\tuint32 tot = slot->acc.size();
+          \t\tbyte *full = (byte *)malloc(tot);
+          \t\tif (full) {
+          \t\t\tmemcpy(full, slot->acc.data(), tot);
+          \t\t\tslot->acc.clear();
+          \t\t\tslot->active = false;
+          \t\t\tslot->owner = nullptr;
+          \t\t\tSeekableAudioStream *vs = makeVorbisStream(new Common::MemoryReadStream(full, tot, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \t\t\treturn leapConvertVorbisToRawMem(vs, targetRate, targetFlags);
+          \t\t}
+          \t\tslot->acc.clear();
+          \t\tslot->active = false;
+          \t\tslot->owner = nullptr;
+          \t}
 
-\t// While accumulating slices before EOS, feed tiny 4-sample silence so stream stays alive without static!
-\tuint32 silSz = ((targetFlags & FLAG_16BITS) ? 2U : 1U) * ((targetFlags & FLAG_STEREO) ? 2U : 1U) * 4U;
-\tbyte *sil = (byte *)malloc(silSz);
-\tmemset(sil, (targetFlags & FLAG_UNSIGNED) ? 0x80 : 0x00, silSz);
-\treturn new Common::MemoryReadStream(sil, silSz, DisposeAfterUse::YES);
-}
-} // namespace Audio
-"""
+          \t// While accumulating slices before EOS, feed tiny 4-sample silence so stream stays alive without static!
+          \tuint32 silSz = ((targetFlags & FLAG_16BITS) ? 2U : 1U) * ((targetFlags & FLAG_STEREO) ? 2U : 1U) * 4U;
+          \tbyte *sil = (byte *)malloc(silSz);
+          \tmemset(sil, (targetFlags & FLAG_UNSIGNED) ? 0x80 : 0x00, silSz);
+          \treturn new Common::MemoryReadStream(sil, silSz, DisposeAfterUse::YES);
+          }
+          } // namespace Audio
+          """
           raw_t = raw_hdr + raw_orig
           # 1. Patch stream-based makeRawStream (both 4-arg and 5-arg blockAlign signatures)
           raw_t, n_rw1 = re.subn(
               r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*int\s+(\w+)\s*,\s*byte\s+(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)(?:\s*,\s*int\s+\w+)?\s*\)\s*\{)",
               r"""\1
-\tif (\2) {
-\t\tint64 _p0 = \2->pos();
-\t\tint64 _rem = \2->size() - _p0;
-\t\tif (_rem >= 28 && _rem <= 64 * 1024 * 1024) {
-\t\t\tuint32 _mg = \2->readUint32BE();
-\t\t\t\2->seek(_p0, SEEK_SET);
-\t\t\tif (_mg == MKTAG('O', 'g', 'g', 'S')) {
-\t\t\t\tuint32 _sz = (uint32)_rem;
-\t\t\t\tbyte *_ob = (byte *)malloc(_sz);
-\t\t\t\tif (_ob && \2->read(_ob, _sz) == _sz) {
-\t\t\t\t\tif (\5 == DisposeAfterUse::YES)
-\t\t\t\t\t\tdelete \2;
-\t\t\t\t\tSeekableAudioStream *_vs = leapTryDecodeOggBytes(_ob, _sz, \3, \4);
-\t\t\t\t\tfree(_ob);
-\t\t\t\t\tif (_vs)
-\t\t\t\t\t\treturn _vs;
-\t\t\t\t} else {
-\t\t\t\t\tfree(_ob);
-\t\t\t\t\t\2->seek(_p0, SEEK_SET);
-\t\t\t\t}
-\t\t\t}
-\t\t}
-\t}""",
+          \tif (\2) {
+          \t\tint64 _p0 = \2->pos();
+          \t\tint64 _rem = \2->size() - _p0;
+          \t\tif (_rem >= 28 && _rem <= 64 * 1024 * 1024) {
+          \t\t\tuint32 _mg = \2->readUint32BE();
+          \t\t\t\2->seek(_p0, SEEK_SET);
+          \t\t\tif (_mg == MKTAG('O', 'g', 'g', 'S')) {
+          \t\t\t\tuint32 _sz = (uint32)_rem;
+          \t\t\t\tbyte *_ob = (byte *)malloc(_sz);
+          \t\t\t\tif (_ob && \2->read(_ob, _sz) == _sz) {
+          \t\t\t\t\tif (\5 == DisposeAfterUse::YES)
+          \t\t\t\t\t\tdelete \2;
+          \t\t\t\t\tSeekableAudioStream *_vs = leapTryDecodeOggBytes(_ob, _sz, \3, \4);
+          \t\t\t\t\tfree(_ob);
+          \t\t\t\t\tif (_vs)
+          \t\t\t\t\t\treturn _vs;
+          \t\t\t\t} else {
+          \t\t\t\t\tfree(_ob);
+          \t\t\t\t\t\2->seek(_p0, SEEK_SET);
+          \t\t\t\t}
+          \t\t\t}
+          \t\t}
+          \t}""",
               raw_t
           )
           # 2. Patch buffer-based makeRawStream (5-arg and 6-arg blockAlign signatures)
           raw_t, n_rw2 = re.subn(
               r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*const\s+byte\s*\*\s*(\w+)\s*,\s*(?:uint32|int)\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*byte\s+(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)(?:\s*,\s*int\s+\w+)?\s*\)\s*\{)",
               r"""\1
-\tif (\2 && \3 >= 28 && READ_BE_UINT32(\2) == MKTAG('O', 'g', 'g', 'S')) {
-\t\tSeekableAudioStream *_vs = leapTryDecodeOggBytes(\2, (uint32)\3, \4, \5);
-\t\tif (\6 == DisposeAfterUse::YES)
-\t\t\tfree(const_cast<byte *>(\2));
-\t\tif (_vs)
-\t\t\treturn _vs;
-\t}""",
+          \tif (\2 && \3 >= 28 && READ_BE_UINT32(\2) == MKTAG('O', 'g', 'g', 'S')) {
+          \t\tSeekableAudioStream *_vs = leapTryDecodeOggBytes(\2, (uint32)\3, \4, \5);
+          \t\tif (\6 == DisposeAfterUse::YES)
+          \t\t\tfree(const_cast<byte *>(\2));
+          \t\tif (_vs)
+          \t\t\treturn _vs;
+          \t}""",
               raw_t
           )
           # 3. Patch PacketizedRawStream::queuePacket AND QueuingAudioStream/AppendableAudioStream raw buffer append if present in raw.cpp
@@ -526,27 +526,27 @@ static Common::SeekableReadStream *leapFilterPacketStream(const void *owner, Com
           raw_t, n_rw4 = re.subn(
               r"(void\s+(?:\w+::)?append\s*\(\s*const\s+byte\s*\*\s*(\w+)\s*,\s*uint32\s+(\w+)\s*\)\s*\{)",
               r"""\1
-\tif (\2 && \3 > 0) {
-\t\tbyte *_cp = (byte *)malloc(\3);
-\t\tif (_cp) {
-\t\t\tmemcpy(_cp, \2, \3);
-\t\t\tCommon::SeekableReadStream *_inS = new Common::MemoryReadStream(_cp, \3, DisposeAfterUse::YES);
-\t\t\tCommon::SeekableReadStream *_outS = leapFilterPacketStream(this, _inS, _rate, _flags);
-\t\t\tif (_outS != _inS && _outS) {
-\t\t\t\tuint32 _nsz = (uint32)_outS->size();
-\t\t\t\tbyte *_nb = (byte *)malloc(_nsz ? _nsz : 1);
-\t\t\t\tif (_nb) {
-\t\t\t\t\t_outS->read(_nb, _nsz);
-\t\t\t\t\tdelete _outS;
-\t\t\t\t\tqueueBuffer(_nb, _nsz, DisposeAfterUse::YES, _flags);
-\t\t\t\t\treturn;
-\t\t\t\t}
-\t\t\t\tdelete _outS;
-\t\t\t} else {
-\t\t\t\tdelete _outS;
-\t\t\t}
-\t\t}
-\t}""",
+          \tif (\2 && \3 > 0) {
+          \t\tbyte *_cp = (byte *)malloc(\3);
+          \t\tif (_cp) {
+          \t\t\tmemcpy(_cp, \2, \3);
+          \t\t\tCommon::SeekableReadStream *_inS = new Common::MemoryReadStream(_cp, \3, DisposeAfterUse::YES);
+          \t\t\tCommon::SeekableReadStream *_outS = leapFilterPacketStream(this, _inS, _rate, _flags);
+          \t\t\tif (_outS != _inS && _outS) {
+          \t\t\t\tuint32 _nsz = (uint32)_outS->size();
+          \t\t\t\tbyte *_nb = (byte *)malloc(_nsz ? _nsz : 1);
+          \t\t\t\tif (_nb) {
+          \t\t\t\t\t_outS->read(_nb, _nsz);
+          \t\t\t\t\tdelete _outS;
+          \t\t\t\t\tqueueBuffer(_nb, _nsz, DisposeAfterUse::YES, _flags);
+          \t\t\t\t\treturn;
+          \t\t\t\t}
+          \t\t\t\tdelete _outS;
+          \t\t\t} else {
+          \t\t\t\tdelete _outS;
+          \t\t\t}
+          \t\t}
+          \t}""",
               raw_t
           )
           assert n_rw1 >= 1 and n_rw2 >= 1, f"Failed to patch raw.cpp: {n_rw1},{n_rw2},{n_rw3},{n_rw4}"
@@ -559,28 +559,28 @@ static Common::SeekableReadStream *leapFilterPacketStream(const void *owner, Com
               wav_t, _ = re.subn(
                   r"(RewindableAudioStream\s*\*\s*makeWAVStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)\s*\)\s*\{)",
                   r"""\1
-\tif (\2) {
-\t\tint64 _wp0 = \2->pos();
-\t\tint64 _wrem = \2->size() - _wp0;
-\t\tif (_wrem >= 28 && _wrem <= 64 * 1024 * 1024) {
-\t\t\tuint32 _wmg = \2->readUint32BE();
-\t\t\t\2->seek(_wp0, SEEK_SET);
-\t\t\tif (_wmg == MKTAG('O', 'g', 'g', 'S')) {
-\t\t\t\tuint32 _wsz = (uint32)_wrem;
-\t\t\t\tbyte *_wob = (byte *)malloc(_wsz);
-\t\t\t\tif (_wob && \2->read(_wob, _wsz) == _wsz) {
-\t\t\t\t\tif (\3 == DisposeAfterUse::YES)
-\t\t\t\t\t\tdelete \2;
-\t\t\t\t\tRewindableAudioStream *_wvs = makeVorbisStream(new Common::MemoryReadStream(_wob, _wsz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-\t\t\t\t\tif (_wvs)
-\t\t\t\t\t\treturn _wvs;
-\t\t\t\t} else {
-\t\t\t\t\tfree(_wob);
-\t\t\t\t\t\2->seek(_wp0, SEEK_SET);
-\t\t\t\t}
-\t\t\t}
-\t\t}
-\t}""",
+          \tif (\2) {
+          \t\tint64 _wp0 = \2->pos();
+          \t\tint64 _wrem = \2->size() - _wp0;
+          \t\tif (_wrem >= 28 && _wrem <= 64 * 1024 * 1024) {
+          \t\t\tuint32 _wmg = \2->readUint32BE();
+          \t\t\t\2->seek(_wp0, SEEK_SET);
+          \t\t\tif (_wmg == MKTAG('O', 'g', 'g', 'S')) {
+          \t\t\t\tuint32 _wsz = (uint32)_wrem;
+          \t\t\t\tbyte *_wob = (byte *)malloc(_wsz);
+          \t\t\t\tif (_wob && \2->read(_wob, _wsz) == _wsz) {
+          \t\t\t\t\tif (\3 == DisposeAfterUse::YES)
+          \t\t\t\t\t\tdelete \2;
+          \t\t\t\t\tRewindableAudioStream *_wvs = makeVorbisStream(new Common::MemoryReadStream(_wob, _wsz, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \t\t\t\t\tif (_wvs)
+          \t\t\t\t\t\treturn _wvs;
+          \t\t\t\t} else {
+          \t\t\t\t\tfree(_wob);
+          \t\t\t\t\t\2->seek(_wp0, SEEK_SET);
+          \t\t\t\t}
+          \t\t\t}
+          \t\t}
+          \t}""",
                   wav_t
               )
               open(wav_p, "w").write(wav_t)
