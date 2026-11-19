@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V50 (HEMixer QueuingAudioStream OggS Fix + LVD1 320x240 Video)
+name: Build ScummVM Libretro Core V51 (Native HE98 LPOG Audio Inflator + Mailbox Fix + LVD1 Video)
 
 on:
   push:
@@ -272,7 +272,7 @@ jobs:
           assert n_sl == 1 and n_sr == 1, f"Failed to patch smk_decoder.cpp: {n_sl},{n_sr},{n_sf}"
           open(smk_p, "w").write(smk_t)
 
-          # 5b. V50 Clean OggS Streaming Fix: QueuingAudioStream::queueBuffer RFC-3533 Ogg-page reassembler + on-the-fly rate/channel matcher + wave.cpp/raw.cpp/sound_he.cpp
+          # 5b. V51 Native HE98 LPOG->8bit PCM Inflator (sound_he.cpp + mixer_he.cpp) + Mailbox Sound-1 Crash Fix + QueuingAudioStream OggS Safety Net
           ogg_engine_cpp = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
           #include <stdlib.h>
           #include <string.h>
@@ -476,40 +476,26 @@ jobs:
           static bool leapInterceptQueueBuffer(QueuingAudioStream *q, byte *data, uint32 size, DisposeAfterUse::Flag disposeAfterUse) {
           \tif (!q || !data || size == 0)
           \t\treturn false;
-
           \tconst byte *payload = data;
           \tuint32 payloadSz = size;
-          \tif (size >= 68U &&
-          \t    (READ_BE_UINT32(data) == MKTAG('D','I','G','I') || READ_BE_UINT32(data) == MKTAG('T','A','L','K') || READ_BE_UINT32(data) == MKTAG('W','S','O','U')) &&
-          \t    READ_BE_UINT32(data + 32) == MKTAG('S','D','A','T') &&
-          \t    memcmp(data + 40, "OggS\\x00", 5) == 0) {
-          \t\tpayload = data + 40;
-          \t\tpayloadSz = size - 40U;
-          \t}
-
-          \tbool isOggBos = (payloadSz >= 27U && memcmp(payload, "OggS\\x00", 5) == 0 && (payload[5] & 0x02) != 0);
-          \tbool isOggAny = (payloadSz >= 27U && memcmp(payload, "OggS\\x00", 5) == 0);
-
-          \tLeapOggQueueSlot *slot = nullptr;
-          \tfor (int i = 0; i < 32; ++i) {
-          \t\tif (s_leapOggSlots[i].active && s_leapOggSlots[i].owner == q) {
-          \t\t\tslot = &s_leapOggSlots[i];
-          \t\t\tbreak;
+          \tif (size >= 40U && READ_BE_UINT32(data) == MKTAG('L','P','O','G')) {
+          \t\tuint32 oggLen = READ_LE_UINT32(data + 8);
+          \t\tif (oggLen >= 28U && 12U + oggLen <= size) {
+          \t\t\tpayload = data + 12;
+          \t\t\tpayloadSz = oggLen;
           \t\t}
           \t}
-
+          \tbool isOggBos = (payloadSz >= 27U && memcmp(payload, "OggS\\x00", 5) == 0 && (payload[5] & 0x02) != 0);
+          \tbool isOggAny = (payloadSz >= 27U && memcmp(payload, "OggS\\x00", 5) == 0);
+          \tLeapOggQueueSlot *slot = nullptr;
+          \tfor (int i = 0; i < 32; ++i) {
+          \t\tif (s_leapOggSlots[i].active && s_leapOggSlots[i].owner == q) { slot = &s_leapOggSlots[i]; break; }
+          \t}
           \tif (!slot && !isOggAny)
           \t\treturn false;
-
           \tif (!slot) {
           \t\tfor (int i = 0; i < 32; ++i) {
-          \t\t\tif (!s_leapOggSlots[i].active) {
-          \t\t\t\tslot = &s_leapOggSlots[i];
-          \t\t\t\tslot->owner = q;
-          \t\t\t\tslot->buf.clear();
-          \t\t\t\tslot->active = true;
-          \t\t\t\tbreak;
-          \t\t\t}
+          \t\t\tif (!s_leapOggSlots[i].active) { slot = &s_leapOggSlots[i]; slot->owner = q; slot->buf.clear(); slot->active = true; break; }
           \t\t}
           \t\tif (!slot) {
           \t\t\tbyte *copy = (byte *)malloc(payloadSz);
@@ -522,25 +508,12 @@ jobs:
           \t\t\treturn true;
           \t\t}
           \t} else if (isOggBos && slot->buf.size() > 0) {
-          \t\tuint32 prevSz = slot->buf.size();
-          \t\tif (prevSz >= 28U) {
-          \t\t\tbyte *prevCopy = (byte *)malloc(prevSz);
-          \t\t\tif (prevCopy) {
-          \t\t\t\tmemcpy(prevCopy, slot->buf.data(), prevSz);
-          \t\t\t\tSeekableAudioStream *pvs = makeVorbisStream(new Common::MemoryReadStream(prevCopy, prevSz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-          \t\t\t\tif (pvs)
-          \t\t\t\t\tq->queueAudioStream(leapWrapVorbisForQueue(pvs, q->getRate(), q->isStereo()), DisposeAfterUse::YES);
-          \t\t\t}
-          \t\t}
           \t\tslot->buf.clear();
           \t}
-
           \tuint32 oldSz = slot->buf.size();
           \tslot->buf.resize(oldSz + payloadSz);
           \tmemcpy(slot->buf.data() + oldSz, payload, payloadSz);
-          \tif (disposeAfterUse == DisposeAfterUse::YES)
-          \t\tfree(data);
-
+          \tif (disposeAfterUse == DisposeAfterUse::YES) free(data);
           \twhile (slot->active && slot->buf.size() > 0) {
           \t\tint32 cLen = leapFindCompleteOggLength(slot->buf.data(), slot->buf.size());
           \t\tif (cLen > 0) {
@@ -553,33 +526,15 @@ jobs:
           \t\t\t} else {
           \t\t\t\tq->queueAudioStream(new LeapSilenceStream(q->getRate(), q->isStereo(), 2048), DisposeAfterUse::YES);
           \t\t\t}
-          \t\t\tuint32 rem = slot->buf.size() - uLen;
-          \t\t\tif (rem >= 27U && memcmp(slot->buf.data() + uLen, "OggS\\x00", 5) == 0) {
-          \t\t\t\tCommon::Array<byte> tail;
-          \t\t\t\ttail.resize(rem);
-          \t\t\t\tmemcpy(tail.data(), slot->buf.data() + uLen, rem);
-          \t\t\t\tslot->buf.resize(rem);
-          \t\t\t\tmemcpy(slot->buf.data(), tail.data(), rem);
-          \t\t\t} else {
-          \t\t\t\tslot->buf.clear();
-          \t\t\t\tslot->owner = nullptr;
-          \t\t\t\tslot->active = false;
-          \t\t\t\tbreak;
-          \t\t\t}
-          \t\t} else if (cLen < 0 || slot->buf.size() >= 4U * 1024U * 1024U) {
-          \t\t\tuint32 tot = slot->buf.size();
-          \t\t\tSeekableAudioStream *vs = nullptr;
-          \t\t\tif (tot >= 28U) {
-          \t\t\t\tbyte *oggCopy = (byte *)malloc(tot);
-          \t\t\t\tif (oggCopy) {
-          \t\t\t\t\tmemcpy(oggCopy, slot->buf.data(), tot);
-          \t\t\t\t\tvs = makeVorbisStream(new Common::MemoryReadStream(oggCopy, tot, DisposeAfterUse::YES), DisposeAfterUse::YES);
-          \t\t\t\t}
-          \t\t\t}
           \t\t\tslot->buf.clear();
           \t\t\tslot->owner = nullptr;
           \t\t\tslot->active = false;
-          \t\t\tq->queueAudioStream(leapWrapVorbisForQueue(vs, q->getRate(), q->isStereo()), DisposeAfterUse::YES);
+          \t\t\tbreak;
+          \t\t} else if (cLen < 0 || slot->buf.size() >= 4U * 1024U * 1024U) {
+          \t\t\tslot->buf.clear();
+          \t\t\tslot->owner = nullptr;
+          \t\t\tslot->active = false;
+          \t\t\tq->queueAudioStream(new LeapSilenceStream(q->getRate(), q->isStereo(), 2048), DisposeAfterUse::YES);
           \t\t\tbreak;
           \t\t} else {
           \t\t\tbreak;
@@ -591,7 +546,6 @@ jobs:
           } // namespace Audio
           """
 
-          # 1. Patch whichever file (audio/audiostream.cpp or audio/decoders/raw.cpp) defines QueuingAudioStream::queueBuffer!
           patched_qb_file = None
           for qcand in ["audio/audiostream.cpp", "audio/decoders/raw.cpp"]:
               if not os.path.exists(qcand):
@@ -604,160 +558,15 @@ jobs:
                       r"\1\n\tif (leapInterceptQueueBuffer(this, \2, \3, \4)) return;",
                       qt, count=1
                   )
-                  qt, _ = re.subn(
-                      r"(void\s+QueuingAudioStreamImpl::finish\s*\(\s*\)\s*\{)",
-                      r"\1\n\tleapFlushOggSlotOnFinish(this);",
-                      qt, count=1
-                  )
-                  qt, _ = re.subn(
-                      r"(~QueuingAudioStreamImpl\s*\(\s*\)\s*(?:override\s*)?\{)",
-                      r"\1 leapReleaseOggSlot(this);",
-                      qt, count=1
-                  )
+                  qt, _ = re.subn(r"(void\s+QueuingAudioStreamImpl::finish\s*\(\s*\)\s*\{)", r"\1\n\tleapFlushOggSlotOnFinish(this);", qt, count=1)
+                  qt, _ = re.subn(r"(~QueuingAudioStreamImpl\s*\(\s*\)\s*(?:override\s*)?\{)", r"\1 leapReleaseOggSlot(this);", qt, count=1)
                   assert n_qbuf == 1, f"Failed to patch QueuingAudioStream::queueBuffer in {qcand}"
                   open(qcand, "w").write(qt)
                   patched_qb_file = qcand
                   break
-          assert patched_qb_file is not None, "Could not locate QueuingAudioStream::queueBuffer in audiostream.cpp or raw.cpp!"
+          assert patched_qb_file is not None, "Could not locate QueuingAudioStream::queueBuffer"
 
-          # 2. Patch single-shot makeRawStream in audio/decoders/raw.cpp (isolates stream slice into MemoryReadStream; matches 4/5/6-arg signatures)
-          raw_p = "audio/decoders/raw.cpp"
-          raw_t = open(raw_p, "r").read()
-          if "leapFindCompleteOggLength" not in raw_t:
-              raw_t = '#define FORBIDDEN_SYMBOL_ALLOW_ALL\n#include <stdlib.h>\n#include <string.h>\n#include "common/endian.h"\n#include "common/memstream.h"\n#include "audio/audiostream.h"\n#include "audio/decoders/raw.h"\n#include "audio/decoders/vorbis.h"\n' + raw_t
-          raw_t, n_rw1 = re.subn(
-              r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*int\s+(\w+)\s*,\s*byte\s+(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)(?:\s*,\s*int\s+\w+)?\s*\)\s*\{)",
-              r"""\1
-          \tif (\2) {
-          \t\tint64 _p0 = \2->pos();
-          \t\tint64 _rem = \2->size() - _p0;
-          \t\tif (_rem >= 28 && _rem <= 64 * 1024 * 1024) {
-          \t\t\tuint32 _mg = \2->readUint32BE();
-          \t\t\t\2->seek(_p0, SEEK_SET);
-          \t\t\tif (_mg == MKTAG('O', 'g', 'g', 'S')) {
-          \t\t\t\tuint32 _sz = (uint32)_rem;
-          \t\t\t\tbyte *_ob = (byte *)malloc(_sz);
-          \t\t\t\tif (_ob && \2->read(_ob, _sz) == _sz) {
-          \t\t\t\t\tif (\5 == DisposeAfterUse::YES) delete \2;
-          \t\t\t\t\tSeekableAudioStream *_vs = makeVorbisStream(new Common::MemoryReadStream(_ob, _sz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-          \t\t\t\t\tif (_vs) return _vs;
-          \t\t\t\t\tbyte *_sil = (byte *)malloc(64);
-          \t\t\t\t\tmemset(_sil, (\4 & FLAG_UNSIGNED) ? 0x80 : 0x00, 64);
-          \t\t\t\t\treturn makeRawStream(new Common::MemoryReadStream(_sil, 64, DisposeAfterUse::YES), \3 > 0 ? \3 : 11025, \4, DisposeAfterUse::YES);
-          \t\t\t\t} else {
-          \t\t\t\t\tfree(_ob);
-          \t\t\t\t\t\2->seek(_p0, SEEK_SET);
-          \t\t\t\t}
-          \t\t\t}
-          \t\t}
-          \t}""",
-              raw_t
-          )
-          raw_t, n_rw2 = re.subn(
-              r"(SeekableAudioStream\s*\*\s*makeRawStream\s*\(\s*const\s+byte\s*\*\s*(\w+)\s*,\s*(?:uint32|int)\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*byte\s+(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)(?:\s*,\s*int\s+\w+)?\s*\)\s*\{)",
-              r"""\1
-          \tif (\2 && \3 >= 28 && READ_BE_UINT32(\2) == MKTAG('O', 'g', 'g', 'S')) {
-          \t\tbyte *_ob = (byte *)malloc((uint32)\3);
-          \t\tif (_ob) {
-          \t\t\tmemcpy(_ob, \2, (uint32)\3);
-          \t\t\tif (\6 == DisposeAfterUse::YES) free(const_cast<byte *>(\2));
-          \t\t\tSeekableAudioStream *_vs = makeVorbisStream(new Common::MemoryReadStream(_ob, (uint32)\3, DisposeAfterUse::YES), DisposeAfterUse::YES);
-          \t\t\tif (_vs) return _vs;
-          \t\t\tbyte *_sil = (byte *)malloc(64);
-          \t\t\tmemset(_sil, (\5 & FLAG_UNSIGNED) ? 0x80 : 0x00, 64);
-          \t\t\treturn makeRawStream(new Common::MemoryReadStream(_sil, 64, DisposeAfterUse::YES), \4 > 0 ? \4 : 11025, \5, DisposeAfterUse::YES);
-          \t\t}
-          \t}""",
-              raw_t
-          )
-          assert n_rw1 >= 1 and n_rw2 >= 1, f"Failed to patch raw.cpp: {n_rw1},{n_rw2}"
-          open(raw_p, "w").write(raw_t)
-
-          # 3. Patch audio/decoders/wave.cpp (BOTH loadWAVFromStream AND makeWAVStream so RIFF->OggS in .he4 spools cleanly in HEMilesChannel!)
-          wav_p = "audio/decoders/wave.cpp"
-          if os.path.exists(wav_p):
-              wav_hdr = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
-          #include <stdlib.h>
-          #include <string.h>
-          #include "common/endian.h"
-          #include "common/memstream.h"
-          #include "audio/audiostream.h"
-          #include "audio/decoders/raw.h"
-          #include "audio/decoders/wave.h"
-          #include "audio/decoders/vorbis.h"
-
-          namespace Audio {
-          static int32 leapMeasureOggInStream(Common::SeekableReadStream &s, int64 startPos) {
-          \tint64 totalSz = s.size();
-          \tint64 cur = startPos;
-          \tbyte hdr[27];
-          \tbyte seg[255];
-          \twhile (cur + 27 <= totalSz) {
-          \t\ts.seek(cur, SEEK_SET);
-          \t\tif (s.read(hdr, 27) != 27) break;
-          \t\tif (hdr[0] != 'O' || hdr[1] != 'g' || hdr[2] != 'g' || hdr[3] != 'S' || hdr[4] != 0) break;
-          \t\tuint32 nseg = hdr[26];
-          \t\tif (nseg > 0 && s.read(seg, nseg) != nseg) break;
-          \t\tuint32 body = 0;
-          \t\tfor (uint32 i = 0; i < nseg; ++i) body += seg[i];
-          \t\tcur += 27 + (int64)nseg + (int64)body;
-          \t\tif ((hdr[5] & 0x04) != 0) {
-          \t\t\ts.seek(startPos, SEEK_SET);
-          \t\t\treturn (int32)(cur - startPos);
-          \t\t}
-          \t}
-          \ts.seek(startPos, SEEK_SET);
-          \treturn (totalSz > startPos) ? (int32)(totalSz - startPos) : 0;
-          }
-          } // namespace Audio
-          """
-              wav_t = wav_hdr + open(wav_p, "r").read()
-              wav_t, _ = re.subn(
-                  r"(bool\s+loadWAVFromStream\s*\(\s*Common::SeekableReadStream\s*&\s*(\w+)\s*,\s*int\s*&\s*(\w+)\s*,\s*int\s*&\s*(\w+)\s*,\s*byte\s*&\s*(\w+)\s*,\s*uint16\s*\*\s*(\w+)\s*,\s*int\s*\*\s*(\w+)\s*,\s*int\s*\*\s*(\w+)\s*\)\s*\{)",
-                  r"""\1
-          \tint64 _lp0 = \2.pos();
-          \tif (\2.size() - _lp0 >= 28) {
-          \t\tuint32 _lmg = \2.readUint32BE();
-          \t\t\2.seek(_lp0, SEEK_SET);
-          \t\tif (_lmg == MKTAG('O', 'g', 'g', 'S')) {
-          \t\t\t\3 = (int)leapMeasureOggInStream(\2, _lp0);
-          \t\t\t\4 = 22050;
-          \t\t\t\5 = FLAG_UNSIGNED;
-          \t\t\tif (\6) *\6 = 1;
-          \t\t\tif (\7) *\7 = 1;
-          \t\t\tif (\8) *\8 = 0;
-          \t\t\treturn (\3 >= 28);
-          \t\t}
-          \t}""",
-                  wav_t, count=1
-              )
-              wav_t, _ = re.subn(
-                  r"((?:SeekableAudioStream|RewindableAudioStream)\s*\*\s*makeWAVStream\s*\(\s*Common::SeekableReadStream\s*\*\s*(\w+)\s*,\s*DisposeAfterUse::Flag\s+(\w+)\s*\)\s*\{)",
-                  r"""\1
-          \tif (\2) {
-          \t\tint64 _wp0 = \2->pos();
-          \t\tif (\2->size() - _wp0 >= 28) {
-          \t\t\tuint32 _wmg = \2->readUint32BE();
-          \t\t\t\2->seek(_wp0, SEEK_SET);
-          \t\t\tif (_wmg == MKTAG('O', 'g', 'g', 'S')) {
-          \t\t\t\tuint32 _wsz = (uint32)leapMeasureOggInStream(*\2, _wp0);
-          \t\t\t\tbyte *_wob = (_wsz >= 28U) ? (byte *)malloc(_wsz) : nullptr;
-          \t\t\t\tif (_wob && \2->read(_wob, _wsz) == _wsz) {
-          \t\t\t\t\tif (\3 == DisposeAfterUse::YES) delete \2;
-          \t\t\t\t\tSeekableAudioStream *_wvs = makeVorbisStream(new Common::MemoryReadStream(_wob, _wsz, DisposeAfterUse::YES), DisposeAfterUse::YES);
-          \t\t\t\t\tif (_wvs) return _wvs;
-          \t\t\t\t} else {
-          \t\t\t\t\tfree(_wob);
-          \t\t\t\t\t\2->seek(_wp0, SEEK_SET);
-          \t\t\t\t}
-          \t\t\t}
-          \t\t}
-          \t}""",
-                  wav_t, count=1
-              )
-              open(wav_p, "w").write(wav_t)
-
-          # 4. Keep clean V48 sound_he.cpp (.tli talkie offset map with delta clamped to newOff for Ogg safety)
+          # --- Part 2: Patch engines/scumm/he/sound_he.cpp ---
           snd_he_p = "engines/scumm/he/sound_he.cpp"
           snd_he_t = open(snd_he_p, "r").read()
           tli_inc = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
@@ -767,6 +576,12 @@ jobs:
           #include <dirent.h>
           #include <strings.h>
           #include "common/config-manager.h"
+          #include "common/endian.h"
+          #include "common/memstream.h"
+          #include "audio/audiostream.h"
+          #include "audio/decoders/vorbis.h"
+          #include "scumm/scumm.h"
+          #include "scumm/resource.h"
           """
           tli_ns = """namespace Scumm {
           struct LeapTliEntry { uint32 oldOff, newOff, newLen; };
@@ -812,13 +627,199 @@ jobs:
           \tuint32 delta = off - s_tli[lo].oldOff;
           \tif (delta == 0U || delta < s_tli[lo].newLen) { off = s_tli[lo].newOff; if (plen) *plen = s_tli[lo].newLen; }
           }
+
+          static byte *leapDecodeOggToU8Mono(const byte *oggPtr, uint32 oggLen, uint32 origPcmLen) {
+          \tif (!oggPtr || oggLen < 28U || origPcmLen == 0U || origPcmLen > 16U * 1024U * 1024U) return nullptr;
+          \tbyte *pcmOut = (byte *)malloc(origPcmLen);
+          \tif (!pcmOut) return nullptr;
+          \tmemset(pcmOut, 0x80, origPcmLen);
+          \tbyte *oggCopy = (byte *)malloc(oggLen);
+          \tif (!oggCopy) return pcmOut;
+          \tmemcpy(oggCopy, oggPtr, oggLen);
+          \tAudio::SeekableAudioStream *vs = Audio::makeVorbisStream(new Common::MemoryReadStream(oggCopy, oggLen, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \tif (vs) {
+          \t\tconst bool st = vs->isStereo();
+          \t\tint16 tmp[2048];
+          \t\tuint32 outPos = 0;
+          \t\twhile (outPos < origPcmLen && !vs->endOfData()) {
+          \t\t\tint got = vs->readBuffer(tmp, 2048);
+          \t\t\tif (got <= 0) break;
+          \t\t\tif (st) {
+          \t\t\t\tint frames = got / 2;
+          \t\t\t\tfor (int i = 0; i < frames && outPos < origPcmLen; ++i) {
+          \t\t\t\t\tint avg = (((int)tmp[i * 2] + (int)tmp[i * 2 + 1]) >> 9) + 128;
+          \t\t\t\t\tpcmOut[outPos++] = (byte)(avg < 0 ? 0 : (avg > 255 ? 255 : avg));
+          \t\t\t\t}
+          \t\t\t} else {
+          \t\t\t\tfor (int i = 0; i < got && outPos < origPcmLen; ++i) {
+          \t\t\t\t\tint v = ((int)tmp[i] >> 8) + 128;
+          \t\t\t\t\tpcmOut[outPos++] = (byte)(v < 0 ? 0 : (v > 255 ? 255 : v));
+          \t\t\t\t}
+          \t\t\t}
+          \t\t}
+          \t\tdelete vs;
+          \t}
+          \treturn pcmOut;
+          }
+
+          template <typename EngineT>
+          static void leapInflateSoundResourceIfNeeded(EngineT *vm, int soundId) {
+          \tif (!vm || !vm->_res || soundId <= 0 || (uint)soundId >= vm->_res->_types[rtSound].size()) return;
+          \tif (!vm->_res->isResourceLoaded(rtSound, soundId) && vm->_res->_types[rtSound][soundId]._roomno == 0) return;
+          \tbyte *ptr = vm->getResourceAddress(rtSound, soundId);
+          \tuint32 resSz = vm->_res->_types[rtSound][soundId]._size;
+          \tif (!ptr || resSz < 56U) return;
+          \tuint32 rootTag = READ_BE_UINT32(ptr);
+          \tif (rootTag != MKTAG('T','A','L','K') && rootTag != MKTAG('D','I','G','I')) return;
+          \tuint32 pos = 8U;
+          \twhile (pos + 8U <= resSz) {
+          \t\tuint32 stag = READ_BE_UINT32(ptr + pos);
+          \t\tuint32 ssz  = READ_BE_UINT32(ptr + pos + 4U);
+          \t\tif (ssz < 8U || pos + ssz > resSz) break;
+          \t\tif (stag == MKTAG('S','D','A','T')) {
+          \t\t\tif (ssz >= 48U && READ_BE_UINT32(ptr + pos + 8U) == MKTAG('L','P','O','G')) {
+          \t\t\t\tuint32 origPcmLen = READ_LE_UINT32(ptr + pos + 12U);
+          \t\t\t\tuint32 oggLen     = READ_LE_UINT32(ptr + pos + 16U);
+          \t\t\t\tif (origPcmLen > 0U && origPcmLen <= 16U * 1024U * 1024U && oggLen >= 28U && 20U + oggLen <= ssz) {
+          \t\t\t\t\tuint32 prefixLen = pos, tailOff = pos + ssz;
+          \t\t\t\t\tuint32 tailLen = (resSz > tailOff) ? (resSz - tailOff) : 0U;
+          \t\t\t\t\tbyte *prefix = (byte *)malloc(prefixLen);
+          \t\t\t\t\tbyte *tail   = tailLen ? (byte *)malloc(tailLen) : nullptr;
+          \t\t\t\t\tbyte *pcmOut = leapDecodeOggToU8Mono(ptr + pos + 20U, oggLen, origPcmLen);
+          \t\t\t\t\tif (prefix && pcmOut && (!tailLen || tail)) {
+          \t\t\t\t\t\tmemcpy(prefix, ptr, prefixLen);
+          \t\t\t\t\t\tif (tailLen) memcpy(tail, ptr + tailOff, tailLen);
+          \t\t\t\t\t\tbool wasLocked  = vm->_res->isLocked(rtSound, soundId);
+          \t\t\t\t\t\tbool wasOffHeap = vm->_res->isOffHeap(rtSound, soundId);
+          \t\t\t\t\t\tuint32 newTotal = prefixLen + 8U + origPcmLen + tailLen;
+          \t\t\t\t\t\tbyte *newPtr = vm->_res->createResource(rtSound, soundId, newTotal);
+          \t\t\t\t\t\tif (newPtr) {
+          \t\t\t\t\t\t\tmemcpy(newPtr, prefix, prefixLen);
+          \t\t\t\t\t\t\tWRITE_BE_UINT32(newPtr + 4U, newTotal);
+          \t\t\t\t\t\t\tWRITE_BE_UINT32(newPtr + prefixLen, MKTAG('S','D','A','T'));
+          \t\t\t\t\t\t\tWRITE_BE_UINT32(newPtr + prefixLen + 4U, 8U + origPcmLen);
+          \t\t\t\t\t\t\tmemcpy(newPtr + prefixLen + 8U, pcmOut, origPcmLen);
+          \t\t\t\t\t\t\tif (tailLen) memcpy(newPtr + prefixLen + 8U + origPcmLen, tail, tailLen);
+          \t\t\t\t\t\t\tif (wasLocked)  vm->_res->lock(rtSound, soundId);
+          \t\t\t\t\t\t\tif (wasOffHeap) vm->_res->setOffHeap(rtSound, soundId);
+          \t\t\t\t\t\t}
+          \t\t\t\t\t}
+          \t\t\t\t\tfree(prefix); free(tail); free(pcmOut);
+          \t\t\t\t}
+          \t\t\t}
+          \t\t\treturn;
+          \t\t}
+          \t\tpos += ssz;
+          \t}
+          }
           """
           assert "namespace Scumm {" in snd_he_t, "Missing namespace Scumm in sound_he.cpp"
           snd_he_t = tli_inc + snd_he_t.replace("namespace Scumm {", tli_ns, 1)
           snd_he_t, n_pv = re.subn(r"(void\s+SoundHE::playVoice\s*\(\s*uint32\s+(\w+)\s*,\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, &\3);", snd_he_t, count=1)
           snd_he_t, n_st = re.subn(r"(void\s+SoundHE::startHETalkSound\s*\(\s*uint32\s+(\w+)\s*\)\s*\{)", r"\1 leapMapTli(\2, nullptr);", snd_he_t, count=1)
-          assert (n_pv + n_st) >= 1, f"Failed to patch sound_he.cpp: {n_pv},{n_st}"
+          snd_he_t, n_ts = re.subn(r"(void\s+SoundHE::triggerSound\s*\(\s*int\s+(\w+)\s*,[^)]*\)\s*\{)", r"\1 leapInflateSoundResourceIfNeeded(_vm, \2);", snd_he_t, count=1)
+          snd_he_t, n_cs = re.subn(r"(void\s+SoundHE::createSound\s*\(\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*\)\s*\{)", r"\1 leapInflateSoundResourceIfNeeded(_vm, \2); if (\3 > 0) leapInflateSoundResourceIfNeeded(_vm, \3);", snd_he_t, count=1)
+          snd_he_t, n_il = re.subn(r'\berror\s*\(\s*("SoundHE::triggerSound\(\):[^;]+)\);', r'{ warning(\1); return; }', snd_he_t)
+          snd_he_t, _ = re.subn(
+              r"(void\s+SoundHE::hsStartDigitalSound\s*\(\s*int\s+\w+\s*,\s*int\s+\w+\s*,\s*byte\s*\*\s*(\w+)\s*,\s*int\s+\w+\s*,\s*int\s+\w+\s*,\s*int\s+\w+\s*,\s*int\s+(\w+)\s*,[^)]*\)\s*\{)",
+              r"\1 if (\2 == nullptr && _heSpoolingMusicFile.isOpen() && \3 >= 40) { int64 _sp0 = _heSpoolingMusicFile.pos(); byte _lh[12] = {0}; if (_heSpoolingMusicFile.read(_lh, 12) == 12 && READ_BE_UINT32(_lh) == MKTAG('L','P','O','G')) { uint32 _origN = READ_LE_UINT32(_lh + 4); if (_origN > 0U && _origN <= 16U * 1024U * 1024U) \3 = (int)_origN; } _heSpoolingMusicFile.seek(_sp0, SEEK_SET); }",
+              snd_he_t, count=1
+          )
+          assert (n_pv + n_st) >= 1 and n_ts == 1 and n_il >= 1, f"Failed to patch sound_he.cpp: {n_pv},{n_st},{n_ts},{n_cs},{n_il}"
           open(snd_he_p, "w").write(snd_he_t)
+
+          # --- Part 3: Patch engines/scumm/he/mixer_he.cpp ---
+          mix_he_p = "engines/scumm/he/mixer_he.cpp"
+          mix_he_t = open(mix_he_p, "r").read()
+          mix_inc = """#define FORBIDDEN_SYMBOL_ALLOW_ALL
+          #include <stdlib.h>
+          #include <string.h>
+          #include "common/endian.h"
+          #include "common/file.h"
+          #include "common/memstream.h"
+          #include "audio/audiostream.h"
+          #include "audio/decoders/vorbis.h"
+          """
+          mix_ns = """namespace Scumm {
+          static Common::File s_leapSpoolFiles[8][2];
+          static int s_leapSpoolToggle[8] = {0};
+          static Common::File *leapPrepareHe4SpoolFile(int channel, Common::File &srcFile, int &sampleLen) {
+          \tif (!srcFile.isOpen()) return nullptr;
+          \tint64 p0 = srcFile.pos(), fsz = srcFile.size();
+          \tif (p0 < 0 || p0 + 40 > fsz) return nullptr;
+          \tbyte hdr[12] = {0};
+          \tif (srcFile.read(hdr, 12) != 12) { srcFile.seek(p0, SEEK_SET); return nullptr; }
+          \tint64 lpogPos = -1; uint32 origPcmLen = 0, oggLen = 0;
+          \tif (READ_BE_UINT32(hdr) == MKTAG('L','P','O','G')) {
+          \t\tlpogPos = p0; origPcmLen = READ_LE_UINT32(hdr + 4); oggLen = READ_LE_UINT32(hdr + 8);
+          \t} else if (READ_BE_UINT32(hdr) == MKTAG('D','I','G','I') || READ_BE_UINT32(hdr) == MKTAG('T','A','L','K')) {
+          \t\tint64 cur = p0 + 8;
+          \t\twhile (cur + 8 <= fsz && cur < p0 + 65536) {
+          \t\t\tsrcFile.seek(cur, SEEK_SET);
+          \t\t\tbyte sh[8] = {0};
+          \t\t\tif (srcFile.read(sh, 8) != 8) break;
+          \t\t\tuint32 stag = READ_BE_UINT32(sh), ssz = READ_BE_UINT32(sh + 4);
+          \t\t\tif (ssz < 8U || cur + (int64)ssz > fsz) break;
+          \t\t\tif (stag == MKTAG('S','D','A','T')) {
+          \t\t\t\tif (ssz >= 48U && srcFile.read(hdr, 12) == 12 && READ_BE_UINT32(hdr) == MKTAG('L','P','O','G')) {
+          \t\t\t\t\tlpogPos = cur + 8; origPcmLen = READ_LE_UINT32(hdr + 4); oggLen = READ_LE_UINT32(hdr + 8);
+          \t\t\t\t}
+          \t\t\t\tbreak;
+          \t\t\t}
+          \t\t\tcur += (int64)ssz;
+          \t\t}
+          \t}
+          \tif (lpogPos < 0 || origPcmLen == 0U || origPcmLen > 16U * 1024U * 1024U || oggLen < 28U || lpogPos + 12 + (int64)oggLen > fsz) {
+          \t\tsrcFile.seek(p0, SEEK_SET); return nullptr;
+          \t}
+          \tbyte *oggCopy = (byte *)malloc(oggLen);
+          \tif (!oggCopy) { srcFile.seek(p0, SEEK_SET); return nullptr; }
+          \tsrcFile.seek(lpogPos + 12, SEEK_SET);
+          \tif (srcFile.read(oggCopy, oggLen) != oggLen) { free(oggCopy); srcFile.seek(p0, SEEK_SET); return nullptr; }
+          \tsrcFile.seek(p0, SEEK_SET);
+          \tbyte *pcmOut = (byte *)malloc(origPcmLen);
+          \tif (!pcmOut) { free(oggCopy); return nullptr; }
+          \tmemset(pcmOut, 0x80, origPcmLen);
+          \tAudio::SeekableAudioStream *vs = Audio::makeVorbisStream(new Common::MemoryReadStream(oggCopy, oggLen, DisposeAfterUse::YES), DisposeAfterUse::YES);
+          \tif (vs) {
+          \t\tconst bool st = vs->isStereo();
+          \t\tint16 tmp[2048]; uint32 outPos = 0;
+          \t\twhile (outPos < origPcmLen && !vs->endOfData()) {
+          \t\t\tint got = vs->readBuffer(tmp, 2048);
+          \t\t\tif (got <= 0) break;
+          \t\t\tif (st) {
+          \t\t\t\tint frames = got / 2;
+          \t\t\t\tfor (int i = 0; i < frames && outPos < origPcmLen; ++i) {
+          \t\t\t\t\tint avg = (((int)tmp[i * 2] + (int)tmp[i * 2 + 1]) >> 9) + 128;
+          \t\t\t\t\tpcmOut[outPos++] = (byte)(avg < 0 ? 0 : (avg > 255 ? 255 : avg));
+          \t\t\t\t}
+          \t\t\t} else {
+          \t\t\t\tfor (int i = 0; i < got && outPos < origPcmLen; ++i) {
+          \t\t\t\t\tint v = ((int)tmp[i] >> 8) + 128;
+          \t\t\t\t\tpcmOut[outPos++] = (byte)(v < 0 ? 0 : (v > 255 ? 255 : v));
+          \t\t\t\t}
+          \t\t\t}
+          \t\t}
+          \t\tdelete vs;
+          \t}
+          \tint slot = (channel >= 0 && channel < 8) ? channel : 0;
+          \tint bank = s_leapSpoolToggle[slot] ^ 1;
+          \ts_leapSpoolToggle[slot] = bank;
+          \ts_leapSpoolFiles[slot][bank].close();
+          \ts_leapSpoolFiles[slot][bank].open(new Common::MemoryReadStream(pcmOut, origPcmLen, DisposeAfterUse::YES), "leap_he4_pcm");
+          \tsampleLen = (int)origPcmLen;
+          \treturn &s_leapSpoolFiles[slot][bank];
+          }
+          """
+          assert "namespace Scumm {" in mix_he_t, "Missing namespace Scumm in mixer_he.cpp"
+          mix_he_t = mix_inc + mix_he_t.replace("namespace Scumm {", mix_ns, 1)
+          mix_he_t, n_msc = re.subn(
+              r"(bool\s+HEMixer::mixerStartSpoolingChannel\s*\(\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*Common::File\s*&\s*(\w+)\s*,\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*int\s+(\w+)\s*,\s*uint32\s+(\w+)\s*\)\s*\{)",
+              r"\1\n\tCommon::File *_leapAlt = leapPrepareHe4SpoolFile(\2, \4, \5);\n\tif (_leapAlt) return mixerStartSpoolingChannel(\2, \3, *_leapAlt, \5, \6, \7, \8, \9);",
+              mix_he_t, count=1
+          )
+          assert n_msc == 1, f"Failed to patch mixerStartSpoolingChannel in mixer_he.cpp: {n_msc}"
+          open(mix_he_p, "w").write(mix_he_t)
 
           # 5c. HE .dat backslash fallback + V47 Smacker/LVD1 pacer + post-decode audio pump
           anim_p = "engines/scumm/he/animation_he.cpp"
@@ -1103,7 +1104,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V50 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V51 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -1332,11 +1333,11 @@ jobs:
             ls -lh scummvm_libretro.so >> /work/build_report.txt
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
-      - name: Upload ScummVM Libretro Core V50
+      - name: Upload ScummVM Libretro Core V51
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v50
+          name: scummvm_libretro_leapster_v51
           path: |
             scummvm_libretro.so
             build_scummvm.log
