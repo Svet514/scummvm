@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V54 (HE99 16-Bit FPS Boost + Direct Audio Pump + Dirty-Row LVD1)
+name: Build ScummVM Libretro Core V55 (Restored V53 Audio Timing + End-of-Frame Yield + Dirty-Row LVD1)
 
 on:
   push:
@@ -470,9 +470,6 @@ jobs:
                   if "OSystem_libretro::getMillis" in t:
                       t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1)
                       mod = mod or (n > 0); got_gm = got_gm or (n > 0)
-                  if "::copyRectToScreen" in t:
-                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::copyRectToScreen\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", t, count=1)
-                      mod = mod or (n > 0)
                   if "::updateScreen" in t:
                       t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw); else leapster_pump_audio();", t, count=1)
                       mod = mod or (n > 0); got_us = got_us or (n > 0)
@@ -539,7 +536,6 @@ jobs:
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
           \taudio_last_time_usec = now_usec;
           \tif (delta_usec > 120000) delta_usec = 120000;
-          \tif (g_aud_backoff > 0U && delta_usec > 45000) delta_usec = 45000;
           \tfloat samples_target = audio_samples_accumulator + (44100.0f * (float)delta_usec) / 1000000.0f;
           \tuint32 full_target = (uint32)samples_target;
           \taudio_samples_accumulator = samples_target - (float)full_target;
@@ -559,7 +555,7 @@ jobs:
           \t}
 
           \tuint32 step_fp = 70280U;
-          \tif (g_aud_backoff > 0U) { g_aud_backoff--; step_fp = 72800U; }
+          \tif (g_aud_backoff > 0U) { g_aud_backoff--; step_fp = 71400U; }
           \tstatic uint32 s_rs_pos = 0;
           \tstatic int s_prev_l = 0, s_prev_r = 0;
           \tuint32 out_frames = 0, idx = s_rs_pos >> 16;
@@ -608,7 +604,6 @@ jobs:
           void leapster_os_delay(unsigned int ms);
           }
           extern void retro_switch_to_main_thread(void);
-          static void audio_run(void);
           static retro_environment_t g_orig_env = NULL;
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
@@ -631,7 +626,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V54 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V55 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -657,7 +652,7 @@ jobs:
               if (g_in_pump || g_total_runs < 5) return;
               uint64_t u = leap_us();
               if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
-                  g_in_pump = true; audio_run(); g_in_pump = false;
+                  g_in_pump = true; retro_switch_to_main_thread(); g_in_pump = false;
               }
           }
           extern "C" unsigned int leapster_pace_update_screen(void) {
@@ -696,7 +691,7 @@ jobs:
           static size_t leap_aud_cb(const int16_t *d, size_t f) {
               if (!g_orig_aud || !d || f == 0) return f;
               uint64_t t0 = leap_us(); size_t sent = g_orig_aud(d, f); uint64_t blk = leap_us() - t0;
-              g_blk_u += blk; if (blk >= 1500ULL && g_total_runs >= 5U) g_aud_backoff = 12U;
+              g_blk_u += blk; if (blk >= 4000ULL && g_total_runs >= 5U) g_aud_backoff = 12U;
               g_af += (uint32_t)sent; return sent;
           }
           #define LDK16(c)  (((c) & 0xE71Cu) == 0)
@@ -861,11 +856,11 @@ jobs:
             ls -lh scummvm_libretro.so >> /work/build_report.txt
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
-      - name: Upload ScummVM Libretro Core V54
+      - name: Upload ScummVM Libretro Core V55
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v54
+          name: scummvm_libretro_leapster_v55
           path: |
             scummvm_libretro.so
             build_scummvm.log
