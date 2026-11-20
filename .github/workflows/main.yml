@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V53 (Clean V47 Audio + LVD1 Scaling & Bitmask 15fps + Mailbox Guard)
+name: Build ScummVM Libretro Core V54 (HE99 16-Bit FPS Boost + Direct Audio Pump + Dirty-Row LVD1)
 
 on:
   push:
@@ -210,9 +210,13 @@ jobs:
           \t\t\t\t\t\t_dirtyPalette = true;
           \t\t\t\t\t}
           \t\t\t\t\tuint32 npix = (uint32)_encW * (uint32)_encH;
+          \t\t\t\t\tuint32 firstMod = npix, lastMod = 0U;
           \t\t\t\t\tif (pf & 2U) {
-          \t\t\t\t\t\tif (pos + npix <= ulen)
+          \t\t\t\t\t\tif (pos + npix <= ulen && npix > 0U) {
           \t\t\t\t\t\t\tmemcpy(_idxBuf.data(), _unpBuf.data() + pos, npix);
+          \t\t\t\t\t\t\tfirstMod = 0U;
+          \t\t\t\t\t\t\tlastMod = npix - 1U;
+          \t\t\t\t\t\t}
           \t\t\t\t\t} else if (pf & 4U) {
           \t\t\t\t\t\tuint32 nmask = (npix + 7U) >> 3;
           \t\t\t\t\t\tif (pos + nmask <= ulen) {
@@ -227,8 +231,11 @@ jobs:
           \t\t\t\t\t\t\t\tfor (uint32 bit = 0; bit < 8U; ++bit) {
           \t\t\t\t\t\t\t\t\tif (m & (1U << bit)) {
           \t\t\t\t\t\t\t\t\t\tuint32 pidx = base + bit;
-          \t\t\t\t\t\t\t\t\t\tif (pidx < npix && vals < valsEnd)
+          \t\t\t\t\t\t\t\t\t\tif (pidx < npix && vals < valsEnd) {
           \t\t\t\t\t\t\t\t\t\t\tix[pidx] = *vals++;
+          \t\t\t\t\t\t\t\t\t\t\tif (pidx < firstMod) firstMod = pidx;
+          \t\t\t\t\t\t\t\t\t\t\tlastMod = pidx;
+          \t\t\t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t}
@@ -236,12 +243,34 @@ jobs:
           \t\t\t\t\t} else if (pos + npix <= ulen) {
           \t\t\t\t\t\tconst byte *dl = _unpBuf.data() + pos;
           \t\t\t\t\t\tbyte *ix = _idxBuf.data();
-          \t\t\t\t\t\tfor (uint32 i = 0; i < npix; ++i) ix[i] ^= dl[i];
+          \t\t\t\t\t\tfor (uint32 i = 0; i < npix; ++i) {
+          \t\t\t\t\t\t\tbyte d = dl[i];
+          \t\t\t\t\t\t\tif (d) {
+          \t\t\t\t\t\t\t\tix[i] ^= d;
+          \t\t\t\t\t\t\t\tif (i < firstMod) firstMod = i;
+          \t\t\t\t\t\t\t\tlastMod = i;
+          \t\t\t\t\t\t\t}
+          \t\t\t\t\t\t}
           \t\t\t\t\t}
 
-          \t\t\t\t\tif (_origW == _encW && _origH == _encH) {
-          \t\t\t\t\t\tfor (uint16 y = 0; y < _encH; ++y)
+          \t\t\t\t\tif (firstMod > lastMod) {
+          \t\t\t\t\t\treturn &_surface;
+          \t\t\t\t\t} else if (_origW == _encW && _origH == _encH) {
+          \t\t\t\t\t\tuint16 y0 = (uint16)(firstMod / _encW), y1 = (uint16)(lastMod / _encW);
+          \t\t\t\t\t\tfor (uint16 y = y0; y <= y1; ++y)
           \t\t\t\t\t\t\tmemcpy(_surface.getBasePtr(0, y), _idxBuf.data() + (uint32)y * _encW, _encW);
+          \t\t\t\t\t} else if (_origW == _encW * 2U && _origH == _encH * 2U) {
+          \t\t\t\t\t\tuint16 y0 = (uint16)(firstMod / _encW), y1 = (uint16)(lastMod / _encW);
+          \t\t\t\t\t\tfor (uint16 y = y0; y <= y1; ++y) {
+          \t\t\t\t\t\t\tconst byte *sr = _idxBuf.data() + (uint32)y * _encW;
+          \t\t\t\t\t\t\tuint16 *d0 = (uint16 *)_surface.getBasePtr(0, y * 2U);
+          \t\t\t\t\t\t\tvoid *d1 = _surface.getBasePtr(0, y * 2U + 1U);
+          \t\t\t\t\t\t\tfor (uint16 x = 0; x < _encW; ++x) {
+          \t\t\t\t\t\t\t\tuint16 c = sr[x];
+          \t\t\t\t\t\t\t\td0[x] = (uint16)(c | (c << 8));
+          \t\t\t\t\t\t\t}
+          \t\t\t\t\t\t\tmemcpy(d1, d0, _origW);
+          \t\t\t\t\t\t}
           \t\t\t\t\t} else if (_halfX.size() > 0 && _halfY.size() > 0) {
           \t\t\t\t\t\tuint16 hw = (uint16)_halfX.size(), hh = (uint16)_halfY.size();
           \t\t\t\t\t\tconst uint16 *mx = _halfX.data();
@@ -431,7 +460,7 @@ jobs:
           \t"""
           open(inp_p, "w").write(inp_t[:si_in] + clean_ptr + inp_t[ei_in:])
 
-          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); int leapster_should_yield_audio(void); }\nextern void retro_switch_to_main_thread(void);\n'
+          ext = 'extern "C" { unsigned int leapster_hw_get_millis(void); void leapster_sleep_us(unsigned int us); void leapster_telem_delay(unsigned int r, unsigned int a); unsigned int leapster_pace_update_screen(void); void leapster_os_delay(unsigned int ms); int leapster_should_yield_audio(void); void leapster_pump_audio(void); }\nextern void retro_switch_to_main_thread(void);\n'
           got_gm = got_us = got_dm = False
           for root, _, files in os.walk("backends/platform/libretro/src"):
               for fn in files:
@@ -441,8 +470,11 @@ jobs:
                   if "OSystem_libretro::getMillis" in t:
                       t, n = re.subn(r"(uint32\s+OSystem_libretro::getMillis\s*\([^)]*\)\s*\{)", r"\1 return (uint32)leapster_hw_get_millis();", t, count=1)
                       mod = mod or (n > 0); got_gm = got_gm or (n > 0)
+                  if "::copyRectToScreen" in t:
+                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::copyRectToScreen\s*\([^)]*\)\s*\{)", r"\1 leapster_pump_audio();", t, count=1)
+                      mod = mod or (n > 0)
                   if "::updateScreen" in t:
-                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw);", t, count=1)
+                      t, n = re.subn(r"(void\s+[A-Za-z0-9_]+::updateScreen\s*\([^)]*\)\s*\{)", r"\1 unsigned int _lw = leapster_pace_update_screen(); if (_lw > 0) leapster_os_delay(_lw); else leapster_pump_audio();", t, count=1)
                       mod = mod or (n > 0); got_us = got_us or (n > 0)
                   md = re.search(r"void\s+OSystem_libretro::delayMillis\s*\(\s*uint\s+(\w+)\s*\)\s*\{", t)
                   if md:
@@ -507,6 +539,7 @@ jobs:
           \tretro_time_t delta_usec = now_usec - audio_last_time_usec;
           \taudio_last_time_usec = now_usec;
           \tif (delta_usec > 120000) delta_usec = 120000;
+          \tif (g_aud_backoff > 0U && delta_usec > 45000) delta_usec = 45000;
           \tfloat samples_target = audio_samples_accumulator + (44100.0f * (float)delta_usec) / 1000000.0f;
           \tuint32 full_target = (uint32)samples_target;
           \taudio_samples_accumulator = samples_target - (float)full_target;
@@ -526,7 +559,7 @@ jobs:
           \t}
 
           \tuint32 step_fp = 70280U;
-          \tif (g_aud_backoff > 0U) { g_aud_backoff--; step_fp = 71400U; }
+          \tif (g_aud_backoff > 0U) { g_aud_backoff--; step_fp = 72800U; }
           \tstatic uint32 s_rs_pos = 0;
           \tstatic int s_prev_l = 0, s_prev_r = 0;
           \tuint32 out_frames = 0, idx = s_rs_pos >> 16;
@@ -575,6 +608,7 @@ jobs:
           void leapster_os_delay(unsigned int ms);
           }
           extern void retro_switch_to_main_thread(void);
+          static void audio_run(void);
           static retro_environment_t g_orig_env = NULL;
           static retro_input_state_t g_orig_in = NULL;
           static retro_audio_sample_batch_t g_orig_aud = NULL;
@@ -597,7 +631,7 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V53 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V54 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
@@ -623,7 +657,7 @@ jobs:
               if (g_in_pump || g_total_runs < 5) return;
               uint64_t u = leap_us();
               if (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 18000ULL) {
-                  g_in_pump = true; retro_switch_to_main_thread(); g_in_pump = false;
+                  g_in_pump = true; audio_run(); g_in_pump = false;
               }
           }
           extern "C" unsigned int leapster_pace_update_screen(void) {
@@ -689,13 +723,14 @@ jobs:
                               }
                           }
                           g_dbpp = 4;
-                      } else if (p >= 1280) {
-                          size_t row = p >> 1; const uint16_t *base = (const uint16_t *)d; uint16_t *o = g_d16;
+                      } else if (p >= 1280 && (p & 3U) == 0U) {
+                          size_t row32 = p >> 2; const uint32_t *base32 = (const uint32_t *)d; uint16_t *o = g_d16;
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
-                              const uint16_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
+                              const uint32_t *s0 = base32 + (y << 1) * row32, *s1 = s0 + row32;
                               for (unsigned x = 0; x < 320; ++x) {
-                                  unsigned x2 = x << 1; uint16_t p00 = s0[x2], p01 = s0[x2 + 1], p10 = s1[x2], p11 = s1[x2 + 1];
-                                  if (p00 == p10 && p00 == p01 && p00 == p11) { o[x] = p00; continue; }
+                                  uint32_t v0 = s0[x], v1 = s1[x];
+                                  if (v0 == v1 && (v0 >> 16) == (v0 & 0xFFFFu)) { o[x] = (uint16_t)v0; continue; }
+                                  uint16_t p00 = (uint16_t)v0, p01 = (uint16_t)(v0 >> 16), p10 = (uint16_t)v1, p11 = (uint16_t)(v1 >> 16);
                                   uint16_t a0 = (p00 == p01) ? p00 : LAVG16(p00, p01), a1 = (p10 == p11) ? p10 : LAVG16(p10, p11);
                                   if (a0 == a1) { o[x] = a0; continue; }
                                   bool dk0 = LDK16(p00) && LDK16(p01), dk1 = LDK16(p10) && LDK16(p11);
@@ -810,7 +845,7 @@ jobs:
           opt = "-march=armv7-a -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=vfpv3-d16 -mfloat-abi=softfp -marm -munaligned-access -fsigned-char -O3 -fomit-frame-pointer -fno-strict-aliasing -fno-plt -fno-semantic-interposition -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0 -fno-stack-protector -DNDEBUG -DPNG_ARM_NEON_OPT=0 -DUSE_BINK=1 -fPIC"
           ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nUSE_TREMOR := 0\nUSE_OGG := 0\nUSE_VORBIS := 0\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
-          open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common"))
+          open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common") + f"\nCFLAGS += {opt}\nCXXFLAGS += {opt}\n")
           EOF
       - name: Compile Inside Ubuntu 18.04 Container
         run: |
@@ -826,11 +861,11 @@ jobs:
             ls -lh scummvm_libretro.so >> /work/build_report.txt
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
-      - name: Upload ScummVM Libretro Core V53
+      - name: Upload ScummVM Libretro Core V54
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v53
+          name: scummvm_libretro_leapster_v54
           path: |
             scummvm_libretro.so
             build_scummvm.log
