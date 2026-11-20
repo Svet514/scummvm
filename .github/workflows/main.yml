@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V56 (Single-Pass 640x480 RGB555 to 320x240 RGB565 Downscale)
+name: Build ScummVM Libretro Core V57 (HE99 Microsecond Profiler + VERBOSE_BUILD Flag Audit)
 
 on:
   push:
@@ -496,6 +496,66 @@ jobs:
                   if n_gs == 1:
                       open(gs_p, "w").write(gs_ext + gs_t_new)
 
+          # 5f. Subsystem Microsecond Profiler (0 = disk_ms + d_cnt, 1 = wiz_ms, 2 = bg_ms)
+          prof_hdr = (
+              'extern "C" { void leapster_prof_push(int k); void leapster_prof_pop(void); }\n'
+              'struct LeapProfScope { LeapProfScope(int k) { leapster_prof_push(k); } ~LeapProfScope() { leapster_prof_pop(); } };\n'
+          )
+
+          res_p = "engines/scumm/resource.cpp"
+          res_t, n_res = re.subn(
+              r"(\b(?:int|void|bool|uint32)\s+ScummEngine::loadResource\s*\([^;{]*\)\s*\{)",
+              r"\1 LeapProfScope _lps(0);",
+              open(res_p, "r").read(), count=1
+          )
+          assert n_res == 1, f"Failed to hook ScummEngine::loadResource: {n_res}"
+          open(res_p, "w").write(prof_hdr + res_t)
+
+          rhe_p = "engines/scumm/he/resource_he.cpp"
+          if os.path.exists(rhe_p):
+              rhe_t, n_rhe = re.subn(
+                  r"(\b(?:int|void|bool|uint32)\s+ResExtractor::extractResource\s*\([^;{]*\)\s*\{)",
+                  r"\1 LeapProfScope _lps(0);",
+                  open(rhe_p, "r").read()
+              )
+              if n_rhe > 0: open(rhe_p, "w").write(prof_hdr + rhe_t)
+
+          wiz_p = "engines/scumm/he/wiz_he.cpp"
+          wiz_t, n_wiz = re.subn(
+              r"(\bvoid\s+Wiz::(?:processWizImage|flushWizBuffer|drawWizImage|drawWizImageEx|displayWizImage|drawAWiz|simpleDrawAWiz|drawWizPolygon|captureWizImage)\s*\([^;{]*\)\s*\{)",
+              r"\1 LeapProfScope _lps(1);",
+              open(wiz_p, "r").read()
+          )
+          assert n_wiz >= 1, f"Failed to hook Wiz methods in wiz_he.cpp: {n_wiz}"
+          open(wiz_p, "w").write(prof_hdr + wiz_t)
+
+          spr_p = "engines/scumm/he/sprite_he.cpp"
+          if os.path.exists(spr_p):
+              spr_t, n_spr = re.subn(
+                  r"(\bvoid\s+Sprite::(?:displaySpriteList|processImages|updateImages)\s*\([^;{]*\)\s*\{)",
+                  r"\1 LeapProfScope _lps(1);",
+                  open(spr_p, "r").read()
+              )
+              if n_spr > 0: open(spr_p, "w").write(prof_hdr + spr_t)
+
+          akos_p = "engines/scumm/akos.cpp"
+          if os.path.exists(akos_p):
+              akos_t, n_akos = re.subn(
+                  r"(\bbyte\s+AkosRenderer::drawLimb\s*\([^;{]*\)\s*\{)",
+                  r"\1 LeapProfScope _lps(1);",
+                  open(akos_p, "r").read()
+              )
+              if n_akos > 0: open(akos_p, "w").write(prof_hdr + akos_t)
+
+          gfx_p = "engines/scumm/gfx.cpp"
+          gfx_t, n_gfx = re.subn(
+              r"(\bvoid\s+(?:ScummEngine::drawDirtyScreenParts|ScummEngine::updateDirtyScreen|ScummEngine::redrawBGAreas|Gdi::drawStripToScreen|GdiHE::drawBMAPBg|GdiHE::drawBMAPObject)\s*\([^;{]*\)\s*\{)",
+              r"\1 LeapProfScope _lps(2);",
+              open(gfx_p, "r").read()
+          )
+          assert n_gfx >= 2, f"Failed to hook Gdi/ScummEngine in gfx.cpp: {n_gfx}"
+          open(gfx_p, "w").write(prof_hdr + gfx_t)
+
           # 6. V47 1:1 stylus input + monotonic getMillis + 20ms coroutine yield + 25 FPS room cap
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
           inp_t = open(inp_p, "r").read().replace(
@@ -765,10 +825,33 @@ jobs:
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V56 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V57-PROF ===\nsec | wall | emu_ms | r_fps | u_scr | disk_ms | d_cnt | wiz_ms | bg_ms | aud_blk | mix_ms | aud_ms | max_b | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
+          static uint64_t g_prof_u[3] = {0, 0, 0}, g_prof_last_u = 0;
+          static uint32_t g_disk_cnt = 0;
+          static int g_prof_stk[32], g_prof_sp = 0;
+          extern "C" void leapster_prof_push(int k) {
+              uint64_t u = leap_us();
+              if (g_prof_sp > 0 && u > g_prof_last_u) {
+                  int top = (g_prof_sp - 1 < 32) ? g_prof_stk[g_prof_sp - 1] : g_prof_stk[31];
+                  g_prof_u[top] += (u - g_prof_last_u);
+              }
+              if (k == 0) g_disk_cnt++;
+              if (g_prof_sp < 32) g_prof_stk[g_prof_sp] = k;
+              g_prof_sp++;
+              g_prof_last_u = u;
+          }
+          extern "C" void leapster_prof_pop(void) {
+              uint64_t u = leap_us();
+              if (g_prof_sp > 0) {
+                  g_prof_sp--;
+                  int k = (g_prof_sp < 32) ? g_prof_stk[g_prof_sp] : g_prof_stk[31];
+                  if (u > g_prof_last_u) g_prof_u[k] += (u - g_prof_last_u);
+              }
+              g_prof_last_u = u;
+          }
           static bool leap_env_cb(unsigned cmd, void *data) {
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK || cmd == 6U || cmd == 60U) return true;
               return g_orig_env ? g_orig_env(cmd, data) : false;
@@ -988,17 +1071,30 @@ jobs:
               }
               return 0;
           }
-          static void leap_pre(void) { leap_touch(); g_pre_u = leap_us(); }
+          static void leap_pre(void) { leap_touch(); g_pre_u = leap_us(); g_prof_last_u = g_pre_u; }
           static void leap_post(void) {
-              uint64_t u = leap_us(); if (g_pre_u && u > g_pre_u) g_emu_u += (u - g_pre_u);
+              uint64_t u = leap_us();
+              if (g_prof_sp > 0 && u > g_prof_last_u) {
+                  int top = (g_prof_sp - 1 < 32) ? g_prof_stk[g_prof_sp - 1] : g_prof_stk[31];
+                  g_prof_u[top] += (u - g_prof_last_u);
+              }
+              g_prof_last_u = u;
+              if (g_pre_u && u > g_pre_u) g_emu_u += (u - g_pre_u);
               if (!g_win) { leap_open_log(); g_win = u; }
               g_total_runs++; g_runs++;
               if (u - g_win >= 1000000ULL) {
                   g_sec++;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL), bm = (uint32_t)(g_blk_u / 1000ULL);
+                  uint32_t dkm = (uint32_t)(g_prof_u[0] / 1000ULL), wzm = (uint32_t)(g_prof_u[1] / 1000ULL), bgm = (uint32_t)(g_prof_u[2] / 1000ULL);
                   uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 41155U;
-                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %7u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, bm, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
-                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = g_blk_u = 0;
+                  if (g_tfp && g_sec <= 600) {
+                      fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %7u | %5u | %6u | %5u | %7u | %6u | %6u | %5u | %6u | (%d,%d,%d,%u)\n",
+                              g_sec, wm, em, g_runs, g_uscr, dkm, g_disk_cnt, wzm, bgm, bm, mm, am, g_mb, g_dw,
+                              g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks);
+                      fflush(g_tfp);
+                  }
+                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = g_disk_cnt = 0;
+                  g_emu_u = g_blk_u = g_prof_u[0] = g_prof_u[1] = g_prof_u[2] = 0;
               }
           }
           """
@@ -1022,6 +1118,11 @@ jobs:
           ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nUSE_TREMOR := 0\nUSE_OGG := 0\nUSE_VORBIS := 0\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
           open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common") + f"\nCFLAGS += {opt}\nCXXFLAGS += {opt}\n")
+          for vmk in ["Makefile.common", "backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common"]:
+              if os.path.exists(vmk):
+                  vt = open(vmk, "r").read()
+                  vt = re.sub(r"^(\t+)@(\$\((?:CXX|CC)\)\b)", r"\1\2", vt, flags=re.M)
+                  open(vmk, "w").write(vt)
           EOF
       - name: Compile Inside Ubuntu 18.04 Container
         run: |
@@ -1029,19 +1130,21 @@ jobs:
             set -e -o pipefail
             apt-get update && apt-get install -y git ca-certificates pkg-config gcc-arm-linux-gnueabi g++-arm-linux-gnueabi binutils-arm-linux-gnueabi make zip unzip sed gawk
             export CC=arm-linux-gnueabi-gcc CXX=arm-linux-gnueabi-g++ AR="arm-linux-gnueabi-ar cru" RANLIB=arm-linux-gnueabi-ranlib AS=arm-linux-gnueabi-as LD=arm-linux-gnueabi-g++ STRIP=arm-linux-gnueabi-strip
-            make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 USE_TREMOR=0 USE_OGG=0 USE_VORBIS=0 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
-            echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
+            make VERBOSE_BUILD=1 V=1 platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 USE_TREMOR=0 USE_OGG=0 USE_VORBIS=0 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
+            echo "=== WIZ_HE & GFX COMPILE FLAGS ===" > /work/build_report.txt
+            grep -E "wiz_he\.cpp|trle_comp\.cpp|gfx\.cpp" /work/build_scummvm.log >> /work/build_report.txt || true
+            echo "=== GLIBC VERSIONS ===" >> /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
             echo "=== BINARY SIZE ===" >> /work/build_report.txt
             ls -lh scummvm_libretro.so >> /work/build_report.txt
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
-      - name: Upload ScummVM Libretro Core V56
+      - name: Upload ScummVM Libretro Core V57
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v56
+          name: scummvm_libretro_leapster_v57
           path: |
             scummvm_libretro.so
             build_scummvm.log
