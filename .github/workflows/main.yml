@@ -1,4 +1,4 @@
-name: Build ScummVM Libretro Core V58 (Full Script/Hit/Comp/Wiz Profiler + Un-Silenced CXX Flags)
+name: Build ScummVM Libretro Core V59 (Fast SWAR RGB555->RGB565 ManagedSurface Blit + Room-Load Audio Pump)
 
 on:
   push:
@@ -210,13 +210,9 @@ jobs:
           \t\t\t\t\t\t_dirtyPalette = true;
           \t\t\t\t\t}
           \t\t\t\t\tuint32 npix = (uint32)_encW * (uint32)_encH;
-          \t\t\t\t\tuint32 firstMod = npix, lastMod = 0U;
           \t\t\t\t\tif (pf & 2U) {
-          \t\t\t\t\t\tif (pos + npix <= ulen && npix > 0U) {
+          \t\t\t\t\t\tif (pos + npix <= ulen)
           \t\t\t\t\t\t\tmemcpy(_idxBuf.data(), _unpBuf.data() + pos, npix);
-          \t\t\t\t\t\t\tfirstMod = 0U;
-          \t\t\t\t\t\t\tlastMod = npix - 1U;
-          \t\t\t\t\t\t}
           \t\t\t\t\t} else if (pf & 4U) {
           \t\t\t\t\t\tuint32 nmask = (npix + 7U) >> 3;
           \t\t\t\t\t\tif (pos + nmask <= ulen) {
@@ -231,11 +227,8 @@ jobs:
           \t\t\t\t\t\t\t\tfor (uint32 bit = 0; bit < 8U; ++bit) {
           \t\t\t\t\t\t\t\t\tif (m & (1U << bit)) {
           \t\t\t\t\t\t\t\t\t\tuint32 pidx = base + bit;
-          \t\t\t\t\t\t\t\t\t\tif (pidx < npix && vals < valsEnd) {
+          \t\t\t\t\t\t\t\t\t\tif (pidx < npix && vals < valsEnd)
           \t\t\t\t\t\t\t\t\t\t\tix[pidx] = *vals++;
-          \t\t\t\t\t\t\t\t\t\t\tif (pidx < firstMod) firstMod = pidx;
-          \t\t\t\t\t\t\t\t\t\t\tlastMod = pidx;
-          \t\t\t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t\t}
           \t\t\t\t\t\t\t}
@@ -243,34 +236,12 @@ jobs:
           \t\t\t\t\t} else if (pos + npix <= ulen) {
           \t\t\t\t\t\tconst byte *dl = _unpBuf.data() + pos;
           \t\t\t\t\t\tbyte *ix = _idxBuf.data();
-          \t\t\t\t\t\tfor (uint32 i = 0; i < npix; ++i) {
-          \t\t\t\t\t\t\tbyte d = dl[i];
-          \t\t\t\t\t\t\tif (d) {
-          \t\t\t\t\t\t\t\tix[i] ^= d;
-          \t\t\t\t\t\t\t\tif (i < firstMod) firstMod = i;
-          \t\t\t\t\t\t\t\tlastMod = i;
-          \t\t\t\t\t\t\t}
-          \t\t\t\t\t\t}
+          \t\t\t\t\t\tfor (uint32 i = 0; i < npix; ++i) ix[i] ^= dl[i];
           \t\t\t\t\t}
 
-          \t\t\t\t\tif (firstMod > lastMod) {
-          \t\t\t\t\t\treturn &_surface;
-          \t\t\t\t\t} else if (_origW == _encW && _origH == _encH) {
-          \t\t\t\t\t\tuint16 y0 = (uint16)(firstMod / _encW), y1 = (uint16)(lastMod / _encW);
-          \t\t\t\t\t\tfor (uint16 y = y0; y <= y1; ++y)
+          \t\t\t\t\tif (_origW == _encW && _origH == _encH) {
+          \t\t\t\t\t\tfor (uint16 y = 0; y < _encH; ++y)
           \t\t\t\t\t\t\tmemcpy(_surface.getBasePtr(0, y), _idxBuf.data() + (uint32)y * _encW, _encW);
-          \t\t\t\t\t} else if (_origW == _encW * 2U && _origH == _encH * 2U) {
-          \t\t\t\t\t\tuint16 y0 = (uint16)(firstMod / _encW), y1 = (uint16)(lastMod / _encW);
-          \t\t\t\t\t\tfor (uint16 y = y0; y <= y1; ++y) {
-          \t\t\t\t\t\t\tconst byte *sr = _idxBuf.data() + (uint32)y * _encW;
-          \t\t\t\t\t\t\tuint16 *d0 = (uint16 *)_surface.getBasePtr(0, y * 2U);
-          \t\t\t\t\t\t\tvoid *d1 = _surface.getBasePtr(0, y * 2U + 1U);
-          \t\t\t\t\t\t\tfor (uint16 x = 0; x < _encW; ++x) {
-          \t\t\t\t\t\t\t\tuint16 c = sr[x];
-          \t\t\t\t\t\t\t\td0[x] = (uint16)(c | (c << 8));
-          \t\t\t\t\t\t\t}
-          \t\t\t\t\t\t\tmemcpy(d1, d0, _origW);
-          \t\t\t\t\t\t}
           \t\t\t\t\t} else if (_halfX.size() > 0 && _halfY.size() > 0) {
           \t\t\t\t\t\tuint16 hw = (uint16)_halfX.size(), hh = (uint16)_halfY.size();
           \t\t\t\t\t\tconst uint16 *mx = _halfX.data();
@@ -416,7 +387,7 @@ jobs:
           assert n_ms1 == 1 and n_ms2 == 1 and n_ms3 == 1
           open(ms_aud_p, "w").write(ms_aud_t)
 
-          # 5e. V56 Single-Pass 640x480 RGB555 -> 320x240 RGB565 Downscale + SWAR 2-Pixel crossBlit Fast Path
+          # 5e. V59 16-Bit RGB555->RGB565 SWAR Blit + ManagedSurface 1:1 Fast Path + Room-Load Audio Pump
           blit_patched = 0
           for bp in ["graphics/blit/blit.cpp", "graphics/blit/blit-fast.cpp", "graphics/blit/blit-generic.cpp"]:
               if not os.path.exists(bp): continue
@@ -427,315 +398,97 @@ jobs:
                   pdst, psrc, pdp, psp, pw, ph, pdf, psf = pnames
                   swar_inj = f"""
           \tif ({psf}.bytesPerPixel == 2 && {pdf}.bytesPerPixel == 2 &&
-          \t    {psf}.rLoss == 3 && {psf}.gLoss == 3 && {psf}.bLoss == 3 && {psf}.aLoss == 8 &&
-          \t    {psf}.rShift == 10 && {psf}.gShift == 5 && {psf}.bShift == 0 &&
-          \t    {pdf}.rLoss == 3 && {pdf}.gLoss == 2 && {pdf}.bLoss == 3 && {pdf}.aLoss == 8 &&
-          \t    {pdf}.rShift == 11 && {pdf}.gShift == 5 && {pdf}.bShift == 0) {{
-          \t\tif ((uint){pw} == 640U && (uint){ph} == 480U &&
-          \t\t    leapster_try_fast555_crossblit({pdst}, {psrc}, (unsigned int){pdp}, (unsigned int){psp}, (unsigned int){pw}, (unsigned int){ph}))
-          \t\t\treturn true;
-          \t\tfor (uint _y = 0; _y < (uint){ph}; ++_y) {{
-          \t\t\tconst uint16 *_s = (const uint16 *)((const byte *){psrc} + _y * {psp});
-          \t\t\tuint16 *_d = (uint16 *)((byte *){pdst} + _y * {pdp});
-          \t\t\tuint _x = 0;
-          \t\t\tif ((((uintptr_t)_s | (uintptr_t)_d) & 3U) == 0U) {{
-          \t\t\t\tconst uint32 *_s32 = (const uint32 *)_s;
-          \t\t\t\tuint32 *_d32 = (uint32 *)_d;
-          \t\t\t\tuint _pairs = ((uint){pw}) >> 1;
-          \t\t\t\tfor (uint _i = 0; _i < _pairs; ++_i) {{
-          \t\t\t\t\tuint32 _v = _s32[_i];
-          \t\t\t\t\t_d32[_i] = ((_v & 0x7FE07FE0U) << 1) | ((_v & 0x02000200U) >> 4) | (_v & 0x001F001FU);
+          \t    {psf}.rLoss == 3 && {psf}.gLoss == 3 && {psf}.bLoss == 3 &&
+          \t    {pdf}.rLoss == 3 && {pdf}.gLoss == 2 && {pdf}.bLoss == 3 &&
+          \t    {psf}.gShift == 5 && {pdf}.gShift == 5) {{
+          \t\tconst bool _sameOrd = ({psf}.rShift == 10 && {psf}.bShift == 0 && {pdf}.rShift == 11 && {pdf}.bShift == 0) ||
+          \t\t                      ({psf}.rShift == 0 && {psf}.bShift == 10 && {pdf}.rShift == 0 && {pdf}.bShift == 11);
+          \t\tconst bool _swapOrd = ({psf}.rShift == 10 && {psf}.bShift == 0 && {pdf}.rShift == 0 && {pdf}.bShift == 11) ||
+          \t\t                      ({psf}.rShift == 0 && {psf}.bShift == 10 && {pdf}.rShift == 11 && {pdf}.bShift == 0);
+          \t\tif (_sameOrd || _swapOrd) {{
+          \t\t\tfor (uint _y = 0; _y < (uint){ph}; ++_y) {{
+          \t\t\t\tconst uint16 *_s = (const uint16 *)((const byte *){psrc} + _y * {psp});
+          \t\t\t\tuint16 *_d = (uint16 *)((byte *){pdst} + _y * {pdp});
+          \t\t\t\tuint _x = 0;
+          \t\t\t\tif ((((uintptr_t)_s | (uintptr_t)_d) & 3U) == 0U) {{
+          \t\t\t\t\tconst uint32 *_s32 = (const uint32 *)_s;
+          \t\t\t\t\tuint32 *_d32 = (uint32 *)_d;
+          \t\t\t\t\tuint _pairs = ((uint){pw}) >> 1;
+          \t\t\t\t\tif (_sameOrd) {{
+          \t\t\t\t\t\tfor (uint _i = 0; _i < _pairs; ++_i) {{
+          \t\t\t\t\t\t\tuint32 _v = _s32[_i];
+          \t\t\t\t\t\t\t_d32[_i] = ((_v & 0x7FE07FE0U) << 1) | ((_v & 0x02000200U) >> 4) | (_v & 0x001F001FU);
+          \t\t\t\t\t\t}}
+          \t\t\t\t\t}} else {{
+          \t\t\t\t\t\tfor (uint _i = 0; _i < _pairs; ++_i) {{
+          \t\t\t\t\t\t\tuint32 _v = _s32[_i];
+          \t\t\t\t\t\t\t_d32[_i] = ((_v & 0x001F001FU) << 11) | ((_v & 0x03E003E0U) << 1) | ((_v & 0x02000200U) >> 4) | ((_v & 0x7C007C00U) >> 10);
+          \t\t\t\t\t\t}}
+          \t\t\t\t\t}}
+          \t\t\t\t\t_x = _pairs << 1;
           \t\t\t\t}}
-          \t\t\t\t_x = _pairs << 1;
+          \t\t\t\tfor (; _x < (uint){pw}; ++_x) {{
+          \t\t\t\t\tuint32 _c = _s[_x];
+          \t\t\t\t\t_d[_x] = _sameOrd
+          \t\t\t\t\t\t? (uint16)(((_c & 0x7FE0U) << 1) | ((_c & 0x0200U) >> 4) | (_c & 0x001FU))
+          \t\t\t\t\t\t: (uint16)(((_c & 0x001FU) << 11) | ((_c & 0x03E0U) << 1) | ((_c & 0x0200U) >> 4) | ((_c & 0x7C00U) >> 10));
+          \t\t\t\t}}
           \t\t\t}}
-          \t\t\tfor (; _x < (uint){pw}; ++_x) {{
-          \t\t\t\tuint32 _c = _s[_x];
-          \t\t\t\t_d[_x] = (uint16)(((_c & 0x7FE0U) << 1) | ((_c & 0x0200U) >> 4) | (_c & 0x001FU));
-          \t\t\t}}
+          \t\t\treturn true;
           \t\t}}
-          \t\treturn true;
           \t}}"""
-                  ext_cb = 'extern "C" int leapster_try_fast555_crossblit(void *dst, const void *src, unsigned int dstPitch, unsigned int srcPitch, unsigned int w, unsigned int h);\n'
-                  bt = ext_cb + bt[:m_cb.end()] + swar_inj + bt[m_cb.end():]
+                  bt = bt[:m_cb.end()] + swar_inj + bt[m_cb.end():]
                   open(bp, "w").write(bt)
                   blit_patched += 1
                   break
-          assert blit_patched == 1, "Failed to patch Graphics::crossBlit for RGB555->RGB565"
+          assert blit_patched == 1, "Failed to patch Graphics::crossBlit"
+
+          ms_surf_p = "graphics/managed_surface.cpp"
+          assert os.path.exists(ms_surf_p), "graphics/managed_surface.cpp not found"
+          mst = open(ms_surf_p, "r").read()
+          if '#include "graphics/blit.h"' not in mst:
+              mst = '#include "graphics/blit.h"\n' + mst
+          m_bfi = re.search(
+              r"void\s+ManagedSurface::blitFromInner\s*\(\s*const\s+Surface\s*&\s*(\w+)\s*,\s*const\s+Common::Rect\s*&\s*(\w+)\s*,\s*const\s+Common::Rect\s*&\s*(\w+)\s*,\s*const\s+Palette\s*\*\s*(\w+)\s*\)\s*\{",
+              mst
+          )
+          assert m_bfi is not None, "Failed to match ManagedSurface::blitFromInner"
+          psrc_s, psr, pdr, _ = m_bfi.groups()
+          bfi_inj = f"""
+          \tif (!{psr}.isEmpty() && {psr}.width() == {pdr}.width() && {psr}.height() == {pdr}.height() &&
+          \t    {psr}.left >= 0 && {psr}.top >= 0 && {psr}.right <= {psrc_s}.w && {psr}.bottom <= {psrc_s}.h &&
+          \t    {pdr}.left >= 0 && {pdr}.top >= 0 && {pdr}.right <= this->w && {pdr}.bottom <= this->h &&
+          \t    {psrc_s}.format.bytesPerPixel == 2 && this->format.bytesPerPixel == 2) {{
+          \t\tif (Graphics::crossBlit((byte *)this->getBasePtr({pdr}.left, {pdr}.top),
+          \t\t                        (const byte *){psrc_s}.getBasePtr({psr}.left, {psr}.top),
+          \t\t                        this->pitch, {psrc_s}.pitch, {psr}.width(), {psr}.height(),
+          \t\t                        this->format, {psrc_s}.format)) {{
+          \t\t\taddDirtyRect({pdr});
+          \t\t\treturn;
+          \t\t}}
+          \t}}"""
+          mst = mst[:m_bfi.end()] + bfi_inj + mst[m_bfi.end():]
+          open(ms_surf_p, "w").write(mst)
 
           gs_p = "backends/platform/libretro/src/libretro-graphics-surface.cpp"
-          if os.path.exists(gs_p):
-              gs_t = open(gs_p, "r").read()
-              gs_ext = (
-                  'extern "C" {\n'
-                  'int leapster_is_in_pump(void);\n'
-                  'void leapster_prepare_fast555(int ovl, const void *gpx, unsigned int gpitch, int gw, int gh, int gbpp, void *spx, unsigned int spitch, int has_cur, int cy, int hy, int ch);\n'
-                  '}\n'
-              )
-              cy_expr = "-1"
-              m_wm = re.search(r"void\s+LibretroGraphics::warpMouse\s*\(\s*int\s+\w+\s*,\s*int\s+(\w+)\s*\)\s*\{([^}]*)\}", gs_t)
-              if m_wm:
-                  yparam, wbody = m_wm.group(1), m_wm.group(2)
-                  m_asg = re.search(rf"\b(_\w+)\s*=\s*{re.escape(yparam)}\b", wbody)
-                  if m_asg: cy_expr = f"(int){m_asg.group(1)}"
-              hy_expr = "(int)_cursorHotspotYScaled" if "_cursorHotspotYScaled" in gs_t else "(int)_cursorHotspotY" if "_cursorHotspotY" in gs_t else "0"
-              ch_expr = "(int)_cursorHeightScaled" if "_cursorHeightScaled" in gs_t else "(int)_cursor.h" if "_cursor" in gs_t else "64"
-              cur_vis = "(_cursorVisible && _cursor.getPixels() && _cursor.w > 0 && _cursor.h > 0)" if ("_cursorVisible" in gs_t and "_cursor" in gs_t) else ("(_cursor.getPixels() && _cursor.w > 0 && _cursor.h > 0)" if "_cursor" in gs_t else "0")
-
-              if all(k in gs_t for k in ["_overlayVisible", "_gameScreen", "_screen"]):
-                  prep_call = (
-                      f"\tif (leapster_is_in_pump() && _screen.getPixels()) return &_screen;\n"
-                      f"\tleapster_prepare_fast555(_overlayVisible ? 1 : 0, _gameScreen.getPixels(), (unsigned int)_gameScreen.pitch, "
-                      f"(int)_gameScreen.w, (int)_gameScreen.h, (int)_gameScreen.format.bytesPerPixel, "
-                      f"_screen.getPixels(), (unsigned int)_screen.pitch, ({cur_vis}) ? 1 : 0, {cy_expr}, {hy_expr}, {ch_expr});\n"
-                  )
-                  gs_t_new, n_gs = re.subn(
-                      r"(const\s+Graphics::Surface\s*\*\s*LibretroGraphics::(?:getScreen|displayScreen)\s*\(\s*(?:void)?\s*\)\s*\{)",
-                      lambda m: m.group(1) + "\n" + prep_call,
-                      gs_t, count=1
-                  )
-                  if n_gs == 1:
-                      open(gs_p, "w").write(gs_ext + gs_t_new)
-
-          # 5f. V58 Wall-to-Wall Subsystem Microsecond Profiler
-          # Buckets: 0=disk_ms(+d_cnt), 1=wiz_ms, 2=bg_ms, 3=script_ms, 4=hit_ms(+h_cnt), 5=comp_ms
-          prof_hdr = (
-              'extern "C" { extern int g_leap_prof_top; void leapster_prof_push(int k); void leapster_prof_pop(void); }\n'
-              'struct LeapProfScope {\n'
-              '\tbool _a;\n'
-              '\tLeapProfScope(int k) : _a(g_leap_prof_top != k) { if (_a) leapster_prof_push(k); }\n'
-              '\t~LeapProfScope() { if (_a) leapster_prof_pop(); }\n'
-              '};\n'
+          assert os.path.exists(gs_p), "libretro-graphics-surface.cpp not found"
+          gs_t = open(gs_p, "r").read()
+          gs_t_new, n_gs = re.subn(
+              r"(const\s+Graphics::(?:Managed)?Surface\s*\*\s*LibretroGraphics::getScreen\s*\(\s*(?:void)?\s*\)\s*\{)",
+              r"\1\n\tif (leapster_is_in_pump() && _screen.getPixels()) return &_screen;",
+              gs_t, count=1
           )
+          assert n_gs == 1, f"Failed to patch LibretroGraphics::getScreen: {n_gs}"
+          open(gs_p, "w").write('extern "C" int leapster_is_in_pump(void);\n' + gs_t_new)
 
-          def inject_prof_hdr(txt):
-              m_ns = re.search(r"^namespace\s+Scumm\s*\{", txt, flags=re.M)
-              if m_ns:
-                  return txt[:m_ns.start()] + prof_hdr + txt[m_ns.start():]
-              return prof_hdr + txt
-
-          def strip_comments_keep_len(s):
-              out = list(s)
-              n = len(s)
-              i = 0
-              while i < n:
-                  c = s[i]
-                  if c == '/' and i + 1 < n and s[i + 1] == '/':
-                      while i < n and s[i] != '\n':
-                          out[i] = ' '; i += 1
-                  elif c == '/' and i + 1 < n and s[i + 1] == '*':
-                      out[i] = ' '; out[i + 1] = ' '; i += 2
-                      while i < n:
-                          if s[i] == '*' and i + 1 < n and s[i + 1] == '/':
-                              out[i] = ' '; out[i + 1] = ' '; i += 2; break
-                          if s[i] != '\n': out[i] = ' '
-                          i += 1
-                  elif c in ('"', "'"):
-                      q = c; out[i] = ' '; i += 1
-                      while i < n:
-                          if s[i] == '\\' and i + 1 < n:
-                              if s[i] != '\n': out[i] = ' '
-                              if s[i + 1] != '\n': out[i + 1] = ' '
-                              i += 2; continue
-                          if s[i] == q:
-                              out[i] = ' '; i += 1; break
-                          if s[i] != '\n': out[i] = ' '
-                          i += 1
-                  elif c == '#':
-                      i += 1
-                      while i < n:
-                          if s[i] == '\\' and i + 1 < n and s[i + 1] == '\n':
-                              out[i] = ' '; i += 2; continue
-                          if s[i] == '\n': break
-                          out[i] = ' '; i += 1
-                  else:
-                      i += 1
-              return "".join(out)
-
-          def hook_functions_in_cpp(src, default_bucket, name_bucket_fn=None, min_body_lines=1):
-              clean = strip_comments_keep_len(src)
-              n = len(clean)
-              injections = []
-              ns_brace_depths = set()
-              depth = 0
-              last_boundary = 0
-              i = 0
-              bad_kw = {
-                  "if", "for", "while", "switch", "catch", "return", "sizeof", "alignof",
-                  "struct", "class", "enum", "union", "namespace", "constexpr", "decltype",
-                  "typedef", "using"
-              }
-              while i < n:
-                  ch = clean[i]
-                  if ch == ';':
-                      if depth == len(ns_brace_depths):
-                          last_boundary = i + 1
-                      i += 1
-                  elif ch == '{':
-                      at_ns_scope = (depth == len(ns_brace_depths))
-                      sig = clean[last_boundary:i]
-                      sig_no_pp = re.sub(r"#", " ", sig).strip()
-                      if at_ns_scope and re.match(r"^(?:namespace(?:\s+[A-Za-z_][A-Za-z0-9_]*)?|extern)\s*$", sig_no_pp):
-                          ns_brace_depths.add(depth)
-                          depth += 1
-                          last_boundary = i + 1
-                          i += 1
-                          continue
-                      sig_trimmed = sig.lstrip(" \t\r\n#")
-                      if at_ns_scope and '#' not in sig_trimmed:
-                          s_str = sig_trimmed.strip()
-                          m_tail = re.search(r"\)\s*(?:const\b\s*)?(?:noexcept\b\s*)?(?:override\b\s*)?$", s_str)
-                          if m_tail and "=" not in s_str:
-                              rp_idx = s_str.rfind(")")
-                              p_depth = 0; lp_idx = -1
-                              for k in range(rp_idx, -1, -1):
-                                  if s_str[k] == ')': p_depth += 1
-                                  elif s_str[k] == '(':
-                                      p_depth -= 1
-                                      if p_depth == 0: lp_idx = k; break
-                              if lp_idx > 0:
-                                  prefix = s_str[:lp_idx].strip()
-                                  while prefix.startswith("template"):
-                                      lt = prefix.find("<")
-                                      if lt < 0: break
-                                      td = 0; gt = -1
-                                      for k in range(lt, len(prefix)):
-                                          if prefix[k] == '<': td += 1
-                                          elif prefix[k] == '>':
-                                              td -= 1
-                                              if td == 0: gt = k; break
-                                      if gt < 0: break
-                                      prefix = prefix[gt + 1:].strip()
-                                  tokens = re.findall(r"[A-Za-z_~][A-Za-z0-9_~]*|::", prefix)
-                                  if (
-                                      len(tokens) >= 2
-                                      and not any(t in bad_kw for t in tokens)
-                                      and not any("~" in t for t in tokens)
-                                      and "operator" not in tokens
-                                  ):
-                                      fn_name = tokens[-1]
-                                      cls_name = tokens[-3] if (len(tokens) >= 3 and tokens[-2] == "::") else None
-                                      if (
-                                          fn_name != cls_name
-                                          and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", fn_name)
-                                          and not re.match(r"^[A-Z0-9_]+$", fn_name)
-                                      ):
-                                          b_d = 1; j = i + 1
-                                          while j < n and b_d > 0:
-                                              if clean[j] == '{': b_d += 1
-                                              elif clean[j] == '}': b_d -= 1
-                                              j += 1
-                                          if clean[i:j].count('\n') >= min_body_lines:
-                                              bkt = name_bucket_fn(cls_name, fn_name) if name_bucket_fn else default_bucket
-                                              if bkt is not None:
-                                                  injections.append((i + 1, bkt, f"{cls_name + '::' if cls_name else ''}{fn_name}"))
-                      depth += 1
-                      i += 1
-                  elif ch == '}':
-                      depth = max(0, depth - 1)
-                      if depth in ns_brace_depths:
-                          ns_brace_depths.remove(depth)
-                      if depth == len(ns_brace_depths):
-                          last_boundary = i + 1
-                      i += 1
-                  else:
-                      i += 1
-              if not injections:
-                  return src, 0
-              out_parts = []; prev = 0
-              for pos, bkt, _ in injections:
-                  out_parts.append(src[prev:pos])
-                  out_parts.append(f" ::LeapProfScope _lps({bkt});")
-                  prev = pos
-              out_parts.append(src[prev:])
-              return "".join(out_parts), len(injections)
-
-          hook_summary = []
-
-          # 0 = disk_ms (+ d_cnt)
           res_p = "engines/scumm/resource.cpp"
           res_t, n_res = re.subn(
               r"(\b(?:int|void|bool|uint32)\s+ScummEngine::loadResource\s*\([^;{]*\)\s*\{)",
-              r"\1 ::LeapProfScope _lps(0);",
+              r"\1 leapster_pump_audio();",
               open(res_p, "r").read(), count=1
           )
-          assert n_res == 1, f"Failed to hook ScummEngine::loadResource: {n_res}"
-          open(res_p, "w").write(inject_prof_hdr(res_t))
-          hook_summary.append(f"resource.cpp: {n_res}")
-
-          rhe_p = "engines/scumm/he/resource_he.cpp"
-          if os.path.exists(rhe_p):
-              rhe_t, n_rhe = re.subn(
-                  r"(\b(?:int|void|bool|uint32)\s+ResExtractor::extractResource\s*\([^;{]*\)\s*\{)",
-                  r"\1 ::LeapProfScope _lps(0);",
-                  open(rhe_p, "r").read()
-              )
-              if n_rhe > 0:
-                  open(rhe_p, "w").write(inject_prof_hdr(rhe_t))
-                  hook_summary.append(f"resource_he.cpp: {n_rhe}")
-
-          # 3 = script_ms (ScummEngine::runAllScripts)
-          scr_p = "engines/scumm/script.cpp"
-          scr_t, n_scr = re.subn(
-              r"(\bvoid\s+ScummEngine[A-Za-z0-9_]*::runAllScripts\s*\([^;{]*\)\s*\{)",
-              r"\1 ::LeapProfScope _lps(3);",
-              open(scr_p, "r").read()
-          )
-          assert n_scr >= 1, f"Failed to hook runAllScripts in script.cpp: {n_scr}"
-          open(scr_p, "w").write(inject_prof_hdr(scr_t))
-          hook_summary.append(f"script.cpp (runAllScripts): {n_scr}")
-
-          # 4 = hit_ms (+ h_cnt) & 1 = wiz_ms across wiz_he.cpp, wizwarp_he.cpp, sprite_he.cpp, akos.cpp
-          def classify_wiz_fn(cls_name, fn_name):
-              low = fn_name.lower()
-              if any(k in low for k in ("nontransparent", "pixelcolor", "hittest", "histogram", "findsprite", "checksprite", "pixelis")):
-                  return 4
-              return 1
-
-          for wp in ["engines/scumm/he/wiz_he.cpp", "engines/scumm/he/wizwarp_he.cpp", "engines/scumm/he/sprite_he.cpp"]:
-              if os.path.exists(wp):
-                  wt_new, nw = hook_functions_in_cpp(open(wp, "r").read(), 1, classify_wiz_fn, min_body_lines=1)
-                  if nw > 0:
-                      open(wp, "w").write(inject_prof_hdr(wt_new))
-                      hook_summary.append(f"{os.path.basename(wp)}: {nw}")
-
-          akos_p = "engines/scumm/akos.cpp"
-          if os.path.exists(akos_p):
-              akos_t, n_akos = re.subn(
-                  r"(\bbyte\s+AkosRenderer::drawLimb\s*\([^;{]*\)\s*\{)",
-                  r"\1 ::LeapProfScope _lps(1);",
-                  open(akos_p, "r").read()
-              )
-              if n_akos > 0:
-                  open(akos_p, "w").write(inject_prof_hdr(akos_t))
-                  hook_summary.append(f"akos.cpp: {n_akos}")
-
-          # 5 = comp_ms (ALL functions in trle_comp.cpp, mrle_comp.cpp, aux_comp.cpp, gfx_primitives_he.cpp)
-          comp_total = 0
-          for cp_f in [
-              "engines/scumm/he/gfx_comp/trle_comp.cpp",
-              "engines/scumm/he/gfx_comp/mrle_comp.cpp",
-              "engines/scumm/he/gfx_comp/aux_comp.cpp",
-              "engines/scumm/he/gfx_primitives_he.cpp",
-          ]:
-              if os.path.exists(cp_f):
-                  ct_new, nc = hook_functions_in_cpp(open(cp_f, "r").read(), 5, None, min_body_lines=1)
-                  if nc > 0:
-                      open(cp_f, "w").write(inject_prof_hdr(ct_new))
-                      comp_total += nc
-                      hook_summary.append(f"{os.path.basename(cp_f)}: {nc}")
-          assert comp_total >= 4, f"Expected >=4 functions hooked in comp_ms files, got {comp_total}"
-
-          # 2 = bg_ms (gfx.cpp)
-          gfx_p = "engines/scumm/gfx.cpp"
-          gfx_t, n_gfx = re.subn(
-              r"(\bvoid\s+(?:ScummEngine::drawDirtyScreenParts|ScummEngine::updateDirtyScreen|ScummEngine::redrawBGAreas|Gdi::drawStripToScreen|GdiHE::[A-Za-z0-9_]+|GdiHE16bit::(?!GdiHE16bit\b)[A-Za-z0-9_]+)\s*\([^;{]*\)\s*\{)",
-              r"\1 ::LeapProfScope _lps(2);",
-              open(gfx_p, "r").read()
-          )
-          assert n_gfx >= 2, f"Failed to hook Gdi/ScummEngine in gfx.cpp: {n_gfx}"
-          open(gfx_p, "w").write(inject_prof_hdr(gfx_t))
-          hook_summary.append(f"gfx.cpp: {n_gfx}")
-          open("../hook_summary.txt", "w").write("\n".join(hook_summary) + "\n")
+          assert n_res == 1, f"Failed to patch ScummEngine::loadResource: {n_res}"
+          open(res_p, "w").write('extern "C" void leapster_pump_audio(void);\n' + res_t)
 
           # 6. V47 1:1 stylus input + monotonic getMillis + 20ms coroutine yield + 25 FPS room cap
           inp_p = "backends/platform/libretro/src/libretro-os-inputs.cpp"
@@ -944,101 +697,13 @@ jobs:
           static uint32_t g_total_runs = 0, g_runs = 0, g_uscr = 0, g_dc = 0, g_dw = 0, g_mf = 0, g_af = 0, g_mb = 0, g_clicks = 0, g_sec = 0;
           static uint32_t g_d32[320 * 240];
           static uint16_t g_d16[320 * 240];
-          static const void *g_f555_src = NULL;
-          static void *g_f555_dst = NULL;
-          static unsigned int g_f555_spitch = 0, g_f555_dpitch = 0;
-          static int g_f555_armed = 0, g_f555_active = 0, g_f555_partial = 0;
-          static int g_f555_cy0 = 0, g_f555_cy1 = 0, g_f555_prev_cy0 = 0, g_f555_prev_cy1 = 0;
-          static void leap_swar_555_rows(void *dst, unsigned int dpitch, const void *src, unsigned int spitch, int y0, int y1) {
-              if (!dst || !src || y0 >= y1) return;
-              if (y0 < 0) y0 = 0;
-              if (y1 > 480) y1 = 480;
-              for (int y = y0; y < y1; ++y) {
-                  const uint32_t *s32 = (const uint32_t *)((const uint8_t *)src + (size_t)y * spitch);
-                  uint32_t *d32 = (uint32_t *)((uint8_t *)dst + (size_t)y * dpitch);
-                  for (unsigned i = 0; i < 320U; ++i) {
-                      uint32_t v = s32[i];
-                      d32[i] = ((v & 0x7FE07FE0U) << 1) | ((v & 0x02000200U) >> 4) | (v & 0x001F001FU);
-                  }
-              }
-          }
-          extern "C" int leapster_is_in_pump(void) { return g_in_pump ? 1 : 0; }
-          extern "C" void leapster_prepare_fast555(int ovl, const void *gpx, unsigned int gpitch, int gw, int gh, int gbpp, void *spx, unsigned int spitch, int has_cur, int cy, int hy, int ch) {
-              static int s_prev_ovl = 0;
-              if (ovl != s_prev_ovl) { s_prev_ovl = ovl; g_scr_gen++; }
-              g_f555_active = 0;
-              if (ovl || gw != 640 || gh != 480 || gbpp != 2 || !gpx || !spx || (gpitch & 3U) != 0U || (spitch & 3U) != 0U) {
-                  if (g_f555_partial && gpx && spx && gw == 640 && gh == 480 && gbpp == 2 && (gpitch & 3U) == 0U && (spitch & 3U) == 0U)
-                      leap_swar_555_rows(spx, spitch, gpx, gpitch, 0, 480);
-                  g_f555_armed = 0; g_f555_partial = 0; g_f555_cy0 = 0; g_f555_cy1 = 0; g_f555_prev_cy0 = 0; g_f555_prev_cy1 = 0;
-                  return;
-              }
-              g_f555_src = gpx; g_f555_spitch = gpitch; g_f555_dst = spx; g_f555_dpitch = spitch;
-              int ny0 = 0, ny1 = 0;
-              if (has_cur) {
-                  int my = (cy >= 0) ? cy : (g_lsy < 0 ? 240 : (g_lsy << 1));
-                  int cur_h = (ch > 0) ? ch : 64;
-                  int hot_y = (hy >= 0 && hy <= 128) ? hy : 0;
-                  ny0 = (my - hot_y - 4) & ~1;
-                  ny1 = (my - hot_y + cur_h + 5) & ~1;
-                  if (ny0 < 0) ny0 = 0;
-                  if (ny1 > 480) ny1 = 480;
-                  if (ny0 >= ny1) { ny0 = 0; ny1 = 0; }
-              }
-              if (g_f555_partial && ny1 > ny0)
-                  leap_swar_555_rows(spx, spitch, gpx, gpitch, ny0, ny1);
-              g_f555_prev_cy0 = g_f555_cy0; g_f555_prev_cy1 = g_f555_cy1;
-              g_f555_cy0 = ny0; g_f555_cy1 = ny1;
-              g_f555_armed = 1;
-          }
-          extern "C" int leapster_try_fast555_crossblit(void *dst, const void *src, unsigned int dstPitch, unsigned int srcPitch, unsigned int w, unsigned int h) {
-              if (!g_f555_armed || w != 640U || h != 480U || dst != g_f555_dst || src != g_f555_src) return 0;
-              g_f555_armed = 0;
-              g_f555_spitch = srcPitch; g_f555_dpitch = dstPitch;
-              if (g_f555_cy1 > g_f555_cy0)
-                  leap_swar_555_rows(dst, dstPitch, src, srcPitch, g_f555_cy0, g_f555_cy1);
-              if (g_f555_prev_cy1 > g_f555_prev_cy0 && (g_f555_prev_cy0 != g_f555_cy0 || g_f555_prev_cy1 != g_f555_cy1))
-                  leap_swar_555_rows(dst, dstPitch, src, srcPitch, g_f555_prev_cy0, g_f555_prev_cy1);
-              g_f555_active = 1;
-              g_f555_partial = 1;
-              return 1;
-          }
           static void leap_open_log(void) {
               if (!g_tfp) {
                   g_tfp = fopen("/tmp/scummvm_telemetry.log", "w");
-                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V58-PROF ===\nsec | wall | emu_ms | r_fps | u_scr | scr_ms | hit_ms | h_cnt | comp_ms | wiz_ms | bg_ms | disk_ms | d_cnt | aud_blk | mix_ms | aud_ms | max_b | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
+                  if (g_tfp) { fprintf(g_tfp, "=== ScummVM LeapsterGS V59 ===\nsec | wall | emu_ms | r_fps | u_scr | mix_ms | aud_ms | max_b | blk_ms  | d_call | d_wait | touch(x,y,p,clk)\n"); fflush(g_tfp); }
               }
           }
           static uint64_t leap_us(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)(ts.tv_nsec / 1000ULL); }
-          static uint64_t g_prof_u[6] = {0, 0, 0, 0, 0, 0}, g_prof_last_u = 0;
-          static uint32_t g_disk_cnt = 0, g_hit_cnt = 0;
-          static int g_prof_stk[32], g_prof_sp = 0;
-          extern "C" {
-          int g_leap_prof_top = -1;
-          void leapster_prof_push(int k) {
-              uint64_t u = leap_us();
-              if (g_prof_sp > 0 && u > g_prof_last_u) {
-                  int top = (g_prof_sp - 1 < 32) ? g_prof_stk[g_prof_sp - 1] : g_prof_stk[31];
-                  if (top >= 0 && top < 6) g_prof_u[top] += (u - g_prof_last_u);
-              }
-              if (k == 0) g_disk_cnt++;
-              else if (k == 4) g_hit_cnt++;
-              if (g_prof_sp < 32) g_prof_stk[g_prof_sp] = k;
-              g_prof_sp++;
-              g_leap_prof_top = k;
-              g_prof_last_u = u;
-          }
-          void leapster_prof_pop(void) {
-              uint64_t u = leap_us();
-              if (g_prof_sp > 0) {
-                  g_prof_sp--;
-                  int k = (g_prof_sp < 32) ? g_prof_stk[g_prof_sp] : g_prof_stk[31];
-                  if (k >= 0 && k < 6 && u > g_prof_last_u) g_prof_u[k] += (u - g_prof_last_u);
-              }
-              g_leap_prof_top = (g_prof_sp > 0) ? g_prof_stk[(g_prof_sp - 1 < 32) ? (g_prof_sp - 1) : 31] : -1;
-              g_prof_last_u = u;
-          }
-          }
           static bool leap_env_cb(unsigned cmd, void *data) {
               if (cmd == RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK || cmd == 6U || cmd == 60U) return true;
               return g_orig_env ? g_orig_env(cmd, data) : false;
@@ -1057,6 +722,7 @@ jobs:
               uint64_t u = leap_us();
               return (g_last_aud_u && u > g_last_aud_u && (u - g_last_aud_u) >= 20000ULL) ? 1 : 0;
           }
+          extern "C" int leapster_is_in_pump(void) { return g_in_pump ? 1 : 0; }
           extern "C" void leapster_pump_audio(void) {
               if (g_in_pump || g_total_runs < 5) return;
               uint64_t u = leap_us();
@@ -1103,9 +769,6 @@ jobs:
               g_blk_u += blk; if (blk >= 4000ULL && g_total_runs >= 5U) g_aud_backoff = 12U;
               g_af += (uint32_t)sent; return sent;
           }
-          #define LDK15(c)     (((c) & 0x739Cu) == 0)
-          #define LAVG15(a, b) ((uint16_t)(((a) & (b)) + ((((a) ^ (b)) & 0x7BDEu) >> 1)))
-          #define L555TO565(c) ((uint16_t)((((c) & 0x7FE0u) << 1) | (((c) & 0x0200u) >> 4) | ((c) & 0x001Fu)))
           #define LDK16(c)  (((c) & 0xE71Cu) == 0)
           #define LAVG16(a, b) ((uint16_t)(((a) & (b)) + ((((a) ^ (b)) & 0xF7DEu) >> 1)))
           #define LDK32(c)  (((c) & 0x00E0E0E0u) == 0)
@@ -1113,49 +776,10 @@ jobs:
           static void leap_vid_cb(const void *d, unsigned w, unsigned h, size_t p) {
               if (!g_orig_vid) return;
               if (w == 640 && h == 480) {
-                  g_f555_armed = 0;
                   if ((!d || (g_vid_gen == g_scr_gen && g_vid_lx == g_lsx && g_vid_ly == g_lsy)) && g_dbpp != 0) { g_orig_vid(NULL, 320, 240, g_dbpp == 4 ? 1280 : 640); return; }
                   g_vid_gen = g_scr_gen; g_vid_lx = g_lsx; g_vid_ly = g_lsy;
                   if (d) {
-                      if ((g_f555_active || g_f555_partial) && d == g_f555_dst && g_f555_src && p >= 1280 && (p & 3U) == 0U && (g_f555_spitch & 3U) == 0U) {
-                          size_t row32_555 = g_f555_spitch >> 2, row32_565 = p >> 2;
-                          const uint32_t *base555 = (const uint32_t *)g_f555_src;
-                          const uint32_t *base565 = (const uint32_t *)d;
-                          uint16_t *o = g_d16;
-                          int cy0 = g_f555_cy0, cy1 = g_f555_cy1;
-                          for (unsigned y = 0; y < 240; ++y, o += 320) {
-                              int sy = (int)(y << 1);
-                              if (sy >= cy0 && sy < cy1) {
-                                  const uint32_t *s0 = base565 + (size_t)sy * row32_565, *s1 = s0 + row32_565;
-                                  for (unsigned x = 0; x < 320; ++x) {
-                                      uint32_t v0 = s0[x], v1 = s1[x];
-                                      if (v0 == v1 && (v0 >> 16) == (v0 & 0xFFFFu)) { o[x] = (uint16_t)v0; continue; }
-                                      uint16_t p00 = (uint16_t)v0, p01 = (uint16_t)(v0 >> 16), p10 = (uint16_t)v1, p11 = (uint16_t)(v1 >> 16);
-                                      uint16_t a0 = (p00 == p01) ? p00 : LAVG16(p00, p01), a1 = (p10 == p11) ? p10 : LAVG16(p10, p11);
-                                      if (a0 == a1) { o[x] = a0; continue; }
-                                      bool dk0 = LDK16(p00) && LDK16(p01), dk1 = LDK16(p10) && LDK16(p11);
-                                      o[x] = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG16(a0, a1));
-                                  }
-                              } else {
-                                  const uint32_t *s0 = base555 + (size_t)sy * row32_555, *s1 = s0 + row32_555;
-                                  for (unsigned x = 0; x < 320; ++x) {
-                                      uint32_t v0 = s0[x] & 0x7FFF7FFFu, v1 = s1[x] & 0x7FFF7FFFu;
-                                      if (v0 == v1 && (v0 >> 16) == (v0 & 0xFFFFu)) { uint32_t c = v0 & 0xFFFFu; o[x] = L555TO565(c); continue; }
-                                      uint16_t p00 = (uint16_t)v0, p01 = (uint16_t)(v0 >> 16), p10 = (uint16_t)v1, p11 = (uint16_t)(v1 >> 16);
-                                      uint16_t a0 = (p00 == p01) ? p00 : LAVG15(p00, p01), a1 = (p10 == p11) ? p10 : LAVG15(p10, p11);
-                                      uint16_t out15;
-                                      if (a0 == a1) { out15 = a0; }
-                                      else {
-                                          bool dk0 = LDK15(p00) && LDK15(p01), dk1 = LDK15(p10) && LDK15(p11);
-                                          out15 = (dk0 && !dk1) ? a1 : ((dk1 && !dk0) ? a0 : LAVG15(a0, a1));
-                                      }
-                                      o[x] = L555TO565((uint16_t)out15);
-                                  }
-                              }
-                          }
-                          g_f555_active = 0;
-                          g_dbpp = 2;
-                      } else if (p >= 2560) {
+                      if (p >= 2560) {
                           size_t row = p >> 2; const uint32_t *base = (const uint32_t *)d; uint32_t *o = g_d32;
                           for (unsigned y = 0; y < 240; ++y, o += 320) {
                               const uint32_t *s0 = base + (y << 1) * row, *s1 = s0 + row;
@@ -1258,31 +882,17 @@ jobs:
               }
               return 0;
           }
-          static void leap_pre(void) { leap_touch(); g_pre_u = leap_us(); g_prof_last_u = g_pre_u; }
+          static void leap_pre(void) { leap_touch(); g_pre_u = leap_us(); }
           static void leap_post(void) {
-              uint64_t u = leap_us();
-              if (g_prof_sp > 0 && u > g_prof_last_u) {
-                  int top = (g_prof_sp - 1 < 32) ? g_prof_stk[g_prof_sp - 1] : g_prof_stk[31];
-                  if (top >= 0 && top < 6) g_prof_u[top] += (u - g_prof_last_u);
-              }
-              g_prof_last_u = u;
-              if (g_pre_u && u > g_pre_u) g_emu_u += (u - g_pre_u);
+              uint64_t u = leap_us(); if (g_pre_u && u > g_pre_u) g_emu_u += (u - g_pre_u);
               if (!g_win) { leap_open_log(); g_win = u; }
               g_total_runs++; g_runs++;
               if (u - g_win >= 1000000ULL) {
                   g_sec++;
                   uint32_t wm = (uint32_t)((u - g_win) / 1000ULL), em = (uint32_t)(g_emu_u / 1000ULL), bm = (uint32_t)(g_blk_u / 1000ULL);
-                  uint32_t dkm = (uint32_t)(g_prof_u[0] / 1000ULL), wzm = (uint32_t)(g_prof_u[1] / 1000ULL), bgm = (uint32_t)(g_prof_u[2] / 1000ULL);
-                  uint32_t scm = (uint32_t)(g_prof_u[3] / 1000ULL), htm = (uint32_t)(g_prof_u[4] / 1000ULL), cpm = (uint32_t)(g_prof_u[5] / 1000ULL);
                   uint32_t mm = (g_mf * 1000U) / 44100U, am = (g_af * 1000U) / 41155U;
-                  if (g_tfp && g_sec <= 600) {
-                      fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %7u | %6u | %5u | %7u | %5u | %7u | %6u | %6u | %5u | %6u | (%d,%d,%d,%u)\n",
-                              g_sec, wm, em, g_runs, g_uscr, scm, htm, g_hit_cnt, cpm, wzm, bgm, dkm, g_disk_cnt, bm, mm, am, g_mb, g_dw,
-                              g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks);
-                      fflush(g_tfp);
-                  }
-                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = g_disk_cnt = g_hit_cnt = 0;
-                  g_emu_u = g_blk_u = g_prof_u[0] = g_prof_u[1] = g_prof_u[2] = g_prof_u[3] = g_prof_u[4] = g_prof_u[5] = 0;
+                  if (g_tfp && g_sec <= 600) { fprintf(g_tfp, "%3u | %4u | %6u | %5u | %5u | %6u | %6u | %5u | %7u | %6u | %6u | (%d,%d,%d,%u)\n", g_sec, wm, em, g_runs, g_uscr, mm, am, g_mb, bm, g_dc, g_dw, g_lsx < 0 ? 160 : g_lsx, g_lsy < 0 ? 120 : g_lsy, (int)g_rp_out, g_clicks); fflush(g_tfp); }
+                  g_win = u; g_runs = g_uscr = g_dc = g_dw = g_mf = g_af = g_mb = g_clicks = 0; g_emu_u = g_blk_u = 0;
               }
           }
           """
@@ -1306,11 +916,6 @@ jobs:
           ldf = "-Wl,-Bsymbolic -Wl,-Bsymbolic-functions -Wl,--wrap=expf -Wl,--wrap=exp2f -Wl,--wrap=logf -Wl,--wrap=log2f -Wl,--wrap=powf -static-libstdc++ -static-libgcc -lpthread -lm -ldl"
           inj = f"\nTARGET_64BIT := 0\nHIGH_DEF := 1\nUSE_BINK := 1\nUSE_TREMOR := 0\nUSE_OGG := 0\nUSE_VORBIS := 0\nOPENGL_SUPPORT := 0\nUSE_OPENGL := 0\nHAVE_OPENGL := 0\nUSE_IMGUI := 0\nUSE_CURL := 0\nUSE_LIBCURL := 0\nUSE_CLOUD := 0\nUSE_BASIC_NET := 0\nUSE_SDL_NET := 0\nUSE_ALSA := 0\nHAVE_NEON := 0\nCFLAGS += {opt}\nCXXFLAGS += {opt}\nLDFLAGS += {ldf}\n"
           open(mkf, "w").write(mk.replace("include $(ROOT_PATH)/Makefile.common", inj + "\ninclude $(ROOT_PATH)/Makefile.common").replace("include Makefile.common", inj + "\ninclude Makefile.common") + f"\nCFLAGS += {opt}\nCXXFLAGS += {opt}\n")
-          for vmk in ["Makefile.common", "backends/platform/libretro/Makefile", "backends/platform/libretro/Makefile.common"]:
-              if os.path.exists(vmk):
-                  vt = open(vmk, "r").read()
-                  vt = re.sub(r"^([ \t]+)@(\$\((?:CXX|CC|LD)\))", r"\1\2", vt, flags=re.M)
-                  open(vmk, "w").write(vt)
           EOF
       - name: Compile Inside Ubuntu 18.04 Container
         run: |
@@ -1318,23 +923,19 @@ jobs:
             set -e -o pipefail
             apt-get update && apt-get install -y git ca-certificates pkg-config gcc-arm-linux-gnueabi g++-arm-linux-gnueabi binutils-arm-linux-gnueabi make zip unzip sed gawk
             export CC=arm-linux-gnueabi-gcc CXX=arm-linux-gnueabi-g++ AR="arm-linux-gnueabi-ar cru" RANLIB=arm-linux-gnueabi-ranlib AS=arm-linux-gnueabi-as LD=arm-linux-gnueabi-g++ STRIP=arm-linux-gnueabi-strip
-            make VERBOSE_BUILD=1 V=1 QUIET_CXX= QUIET_CC= QUIET= platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 USE_TREMOR=0 USE_OGG=0 USE_VORBIS=0 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
-            echo "=== PROFILER HOOK COUNTS ===" > /work/build_report.txt
-            cat /work/hook_summary.txt >> /work/build_report.txt || true
-            echo "=== WIZ_HE & GFX COMPILE FLAGS ===" >> /work/build_report.txt
-            grep -E "wiz_he\.cpp|trle_comp\.cpp|gfx_primitives_he\.cpp|gfx\.cpp" /work/build_scummvm.log >> /work/build_report.txt || true
-            echo "=== GLIBC VERSIONS ===" >> /work/build_report.txt
+            make platform=unix ARCH=arm TARGET_64BIT=0 HIGH_DEF=1 USE_BINK=1 USE_TREMOR=0 USE_OGG=0 USE_VORBIS=0 CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" LD="$LD" LITE=1 NO_WIP=0 OPENGL_SUPPORT=0 USE_OPENGL=0 HAVE_OPENGL=0 USE_IMGUI=0 USE_CURL=0 USE_LIBCURL=0 USE_CLOUD=0 USE_BASIC_NET=0 USE_SDL_NET=0 USE_ALSA=0 USE_SEQ_MIDI=0 USE_SNDIO=0 USE_TIMIDITY=0 USE_MT32EMU=0 USE_FLUIDSYNTH=0 USE_FLAC=0 USE_MAD=0 USE_FAAD=0 USE_MPEG2=0 USE_THEORADEC=0 USE_FREETYPE2=0 USE_FRIBIDI=0 USE_PNG=1 USE_ZLIB=1 USE_JPEG=1 HAVE_NEON=0 -j$(nproc) all 2>&1 | tee /work/build_scummvm.log
+            echo "=== GLIBC VERSIONS ===" > /work/build_report.txt
             arm-linux-gnueabi-objdump -T scummvm_libretro.so | grep -o "GLIBC_[0-9.]*" | sort -uV >> /work/build_report.txt || true
             $STRIP -s scummvm_libretro.so
             echo "=== BINARY SIZE ===" >> /work/build_report.txt
             ls -lh scummvm_libretro.so >> /work/build_report.txt
             cp scummvm_libretro.so /work/scummvm_libretro.so
           '
-      - name: Upload ScummVM Libretro Core V58
+      - name: Upload ScummVM Libretro Core V59
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scummvm_libretro_leapster_v58
+          name: scummvm_libretro_leapster_v59
           path: |
             scummvm_libretro.so
             build_scummvm.log
